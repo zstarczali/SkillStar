@@ -187,10 +187,20 @@ pub fn skill_desc_system(lang: &str) -> String {
     )
 }
 
-/// Answers a question from search hits of the knowledge base (tests the skill).
+/// RAG answer: numbered passages in, Markdown answer with [n] citations out.
 pub fn ask_system(lang: &str) -> String {
     format!(
-        "You answer questions from a document collection. You get search hits (page texts) inside <hits>, each with the          document title and page number. Answer in {lang}, as Markdown, using ONLY the hits; cite every claim as          [document title, p. N]. If the hits do not contain the answer, say so plainly and suggest better search words.          Text read with OCR may contain character errors.",
+        "You answer questions from a document collection (retrieval-augmented generation). The user message holds          numbered passages retrieved from the documents inside <passages> (<passage n=\"…\" document=\"…\" page=\"…\">),          possibly the earlier conversation, and the question. Answer in {lang}, as Markdown, using ONLY the passages.          Put the passage number in square brackets after every claim it supports: [1], [2][4]. Do not cite documents          in any other way and never invent passage numbers. If the passages do not contain the answer, say so plainly          and suggest other search words. Quote verbatim when the exact wording matters. Text read with OCR may contain          character errors.",
         lang = lang_name(lang)
     )
+}
+
+/// Query expansion for the RAG search: the question → a few full-text search queries.
+pub fn rag_queries_system() -> String {
+    "You write search queries for a full-text (keyword, prefix-matching) search over a document collection, to find \
+     the passages that answer the user's question. Write 3 to 5 queries, one per line, each 2–6 words, no operators, \
+     no quotes, no numbering, nothing else. Use the important terms, their base forms and synonyms, technical terms, \
+     register names or numbers from the question, and translations (English ↔ Hungarian, German) where documents \
+     might use another language. If the question refers to the earlier conversation, resolve the reference."
+        .to_string()
 }

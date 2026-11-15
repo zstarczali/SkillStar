@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS outline (
   PRIMARY KEY (doc_id, ord)
 );
 -- pages finished by a run that was interrupted (cancel, error, app closed): resumed next time
+-- RAG conversations of the AI panel
+CREATE TABLE IF NOT EXISTS chats (
+  id INTEGER PRIMARY KEY,
+  skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_turns (
+  id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  q TEXT NOT NULL,
+  a TEXT NOT NULL,
+  sources TEXT NOT NULL DEFAULT '[]',
+  queries TEXT NOT NULL DEFAULT '[]',
+  created INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_turns_chat ON chat_turns(chat_id, id);
 CREATE TABLE IF NOT EXISTS partial_pages (
   doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   sha TEXT NOT NULL,
@@ -88,13 +106,31 @@ pub fn open(path: &Path) -> Result<Connection, String> {
     let c = Connection::open(path).map_err(|e| e.to_string())?;
     c.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| e.to_string())?;
     c.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+    migrate(&c).map_err(|e| e.to_string())?;
     Ok(c)
+}
+
+/// Columns added after the first databases were created.
+fn migrate(c: &Connection) -> rusqlite::Result<()> {
+    let has = |table: &str, col: &str| -> rusqlite::Result<bool> {
+        let mut st = c.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = st.query_map([], |r| r.get::<_, String>(1))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(names.iter().any(|n| n == col))
+    };
+    if !has("skills", "formats")? {
+        c.execute_batch("ALTER TABLE skills ADD COLUMN formats TEXT NOT NULL DEFAULT 'claude'")?;
+    }
+    if !has("documents", "ocr_lang")? {
+        c.execute_batch("ALTER TABLE documents ADD COLUMN ocr_lang TEXT NOT NULL DEFAULT ''")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 pub fn open_memory() -> Connection {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch(SCHEMA).unwrap();
+    migrate(&c).unwrap();
     c
 }
 
@@ -122,6 +158,8 @@ pub struct Skill {
     pub keywords: String,
     /// output folder override (empty = settings.output_dir)
     pub out_dir: String,
+    /// package formats, comma separated: claude, agents, chatgpt, gemini, deepseek, rag
+    pub formats: String,
     pub created: i64,
     pub updated: i64,
     pub built: i64,
@@ -134,7 +172,8 @@ pub struct Skill {
 const SKILL_COLS: &str = "s.id, s.name, s.title, s.description, s.author, s.version, s.language, s.instructions, s.keywords, s.out_dir, s.created, s.updated, s.built,
   (SELECT COUNT(*) FROM documents d WHERE d.skill_id = s.id),
   (SELECT COUNT(*) FROM documents d WHERE d.skill_id = s.id AND d.status = 'done'),
-  (SELECT COALESCE(SUM(pages), 0) FROM documents d WHERE d.skill_id = s.id)";
+  (SELECT COALESCE(SUM(pages), 0) FROM documents d WHERE d.skill_id = s.id),
+  s.formats";
 
 fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
     Ok(Skill {
@@ -154,6 +193,7 @@ fn skill_row(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
         docs: r.get(13)?,
         done: r.get(14)?,
         pages: r.get(15)?,
+        formats: r.get(16)?,
     })
 }
 
@@ -194,8 +234,8 @@ pub fn create_skill(c: &Connection, title: &str, author: &str, language: &str) -
 pub fn update_skill(c: &Connection, s: &Skill) -> Result<(), String> {
     let name = crate::skill::slugify(&s.name, "skill");
     c.execute(
-        "UPDATE skills SET name=?2, title=?3, description=?4, author=?5, version=?6, language=?7, instructions=?8, keywords=?9, out_dir=?10, updated=?11 WHERE id=?1",
-        params![s.id, name, s.title.trim(), s.description.trim(), s.author.trim(), s.version.trim(), s.language, s.instructions, s.keywords.trim(), s.out_dir.trim(), now()],
+        "UPDATE skills SET name=?2, title=?3, description=?4, author=?5, version=?6, language=?7, instructions=?8, keywords=?9, out_dir=?10, updated=?11, formats=?12 WHERE id=?1",
+        params![s.id, name, s.title.trim(), s.description.trim(), s.author.trim(), s.version.trim(), s.language, s.instructions, s.keywords.trim(), s.out_dir.trim(), now(), crate::skill::clean_formats(&s.formats)],
     )
     .map_err(e)?;
     Ok(())
@@ -239,6 +279,8 @@ pub struct Document {
     pub use_when: String,
     /// "auto" | "force" | "off"
     pub ocr_mode: String,
+    /// OCR engine + language of this document: "" = settings, "win:<tag>", "tess:<langs>"
+    pub ocr_lang: String,
     pub include: bool,
     pub added: i64,
     pub processed: i64,
@@ -251,7 +293,7 @@ pub struct Document {
 }
 
 const DOC_COLS: &str = "id, skill_id, path, name, kind, size, mtime, sha, status, error, pages, ocr_pages, chars, title, summary, use_when, ocr_mode, include, added, processed, ord,
-  (SELECT COUNT(*) FROM partial_pages pp WHERE pp.doc_id = documents.id)";
+  (SELECT COUNT(*) FROM partial_pages pp WHERE pp.doc_id = documents.id), ocr_lang";
 
 fn doc_row(r: &rusqlite::Row) -> rusqlite::Result<Document> {
     Ok(Document {
@@ -279,6 +321,7 @@ fn doc_row(r: &rusqlite::Row) -> rusqlite::Result<Document> {
         stale: false,
         missing: false,
         partial: r.get(21)?,
+        ocr_lang: r.get(22)?,
     })
 }
 
@@ -348,10 +391,10 @@ pub fn set_status(c: &Connection, id: i64, status: &str, error: &str) -> Result<
 }
 
 /// Fields the user edits in the UI.
-pub fn update_document_meta(c: &Connection, id: i64, title: &str, summary: &str, use_when: &str, ocr_mode: &str, include: bool) -> Result<(), String> {
+pub fn update_document_meta(c: &Connection, id: i64, title: &str, summary: &str, use_when: &str, ocr_mode: &str, ocr_lang: &str, include: bool) -> Result<(), String> {
     c.execute(
-        "UPDATE documents SET title=?2, summary=?3, use_when=?4, ocr_mode=?5, include=?6 WHERE id=?1",
-        params![id, title.trim(), summary.trim(), use_when.trim(), ocr_mode, include as i64],
+        "UPDATE documents SET title=?2, summary=?3, use_when=?4, ocr_mode=?5, include=?6, ocr_lang=?7 WHERE id=?1",
+        params![id, title.trim(), summary.trim(), use_when.trim(), ocr_mode, include as i64, ocr_lang.trim()],
     )
     .map_err(e)?;
     Ok(())
@@ -433,6 +476,86 @@ pub fn outline(c: &Connection, doc_id: i64) -> Result<Vec<OutlineItem>, String> 
     rows.collect::<Result<Vec<_>, _>>().map_err(e)
 }
 
+// ───────────────────────── RAG conversations ─────────────────────────
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Chat {
+    pub id: i64,
+    pub skill_id: i64,
+    pub title: String,
+    pub created: i64,
+    pub updated: i64,
+    pub turns: i64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ChatTurn {
+    pub id: i64,
+    pub q: String,
+    pub a: String,
+    /// rag::Passage list as JSON
+    pub sources: serde_json::Value,
+    pub queries: serde_json::Value,
+    pub created: i64,
+}
+
+/// Conversations of a skill, newest first.
+pub fn chats(c: &Connection, skill_id: i64) -> Result<Vec<Chat>, String> {
+    let mut st = c
+        .prepare("SELECT ch.id, ch.skill_id, ch.title, ch.created, ch.updated, (SELECT COUNT(*) FROM chat_turns t WHERE t.chat_id = ch.id) FROM chats ch WHERE ch.skill_id = ?1 ORDER BY ch.updated DESC, ch.id DESC")
+        .map_err(e)?;
+    let rows = st
+        .query_map([skill_id], |r| Ok(Chat { id: r.get(0)?, skill_id: r.get(1)?, title: r.get(2)?, created: r.get(3)?, updated: r.get(4)?, turns: r.get(5)? }))
+        .map_err(e)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(e)
+}
+
+pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String> {
+    let mut st = c.prepare("SELECT id, q, a, sources, queries, created FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
+    let rows = st
+        .query_map([chat_id], |r| {
+            let src: String = r.get(3)?;
+            let qs: String = r.get(4)?;
+            Ok(ChatTurn {
+                id: r.get(0)?,
+                q: r.get(1)?,
+                a: r.get(2)?,
+                sources: serde_json::from_str(&src).unwrap_or(serde_json::Value::Array(vec![])),
+                queries: serde_json::from_str(&qs).unwrap_or(serde_json::Value::Array(vec![])),
+                created: r.get(5)?,
+            })
+        })
+        .map_err(e)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(e)
+}
+
+pub fn create_chat(c: &Connection, skill_id: i64, title: &str) -> Result<i64, String> {
+    let t = now();
+    c.execute("INSERT INTO chats (skill_id, title, created, updated) VALUES (?1, ?2, ?3, ?3)", params![skill_id, title.trim(), t]).map_err(e)?;
+    Ok(c.last_insert_rowid())
+}
+
+pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str) -> Result<(), String> {
+    let t = now();
+    c.execute(
+        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![chat_id, q, a, sources, queries, t],
+    )
+    .map_err(e)?;
+    c.execute("UPDATE chats SET updated=?2 WHERE id=?1", params![chat_id, t]).map_err(e)?;
+    Ok(())
+}
+
+pub fn rename_chat(c: &Connection, id: i64, title: &str) -> Result<(), String> {
+    c.execute("UPDATE chats SET title=?2 WHERE id=?1", params![id, title.trim()]).map_err(e)?;
+    Ok(())
+}
+
+pub fn delete_chat(c: &Connection, id: i64) -> Result<(), String> {
+    c.execute("DELETE FROM chats WHERE id=?1", [id]).map_err(e)?;
+    Ok(())
+}
+
 // ───────────────────────── resumable processing ─────────────────────────
 
 /// Pages of an interrupted run of this exact file (same hash); others are dropped.
@@ -470,6 +593,9 @@ pub fn clear_partial(c: &Connection, doc_id: i64) -> Result<(), String> {
 #[derive(Serialize, Clone, Debug)]
 pub struct Hit {
     pub doc_id: i64,
+    pub skill_id: i64,
+    /// document kind (pdf, docx…): the UI offers the page image of PDFs and images
+    pub kind: String,
     pub doc: String,
     pub page: i64,
     pub snippet: String,
@@ -496,6 +622,11 @@ pub fn search(c: &Connection, skill_id: i64, q: &str, limit: i64) -> Result<Vec<
     Ok(hits)
 }
 
+/// A ready FTS5 match expression (the RAG retrieval builds its own); skill 0 = every skill.
+pub fn search_expr(c: &Connection, skill_id: i64, expr: &str, limit: i64) -> Result<Vec<Hit>, String> {
+    run_search(c, skill_id, expr, limit)
+}
+
 fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<Hit>, String> {
     if m.is_empty() {
         return Ok(vec![]);
@@ -503,15 +634,15 @@ fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<
     let mut st = c
         .prepare(
             "SELECT f.doc_id, CASE WHEN d.title <> '' THEN d.title ELSE d.name END, f.no,
-                    snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text
+                    snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text, d.skill_id, d.kind
              FROM pages_fts f JOIN documents d ON d.id = f.doc_id
-             WHERE pages_fts MATCH ?1 AND d.skill_id = ?2
+             WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND d.include = 1
              ORDER BY bm25(pages_fts) LIMIT ?3",
         )
         .map_err(e)?;
     let rows = st
         .query_map(params![m, skill_id, limit], |r| {
-            Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)? })
+            Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)?, skill_id: r.get(5)?, kind: r.get(6)? })
         })
         .map_err(e)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(e)
@@ -558,6 +689,17 @@ mod tests {
         assert_eq!(partial_pages(&c, d, "h1").unwrap().len(), 1);
         assert!(partial_pages(&c, d, "h2").unwrap().is_empty());
         assert_eq!(document(&c, d).unwrap().partial, 0);
+        // conversations: newest first, turns in order, removed with the chat
+        let ch = create_chat(&c, s, "Első kérdés").unwrap();
+        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#).unwrap();
+        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]").unwrap();
+        let list = chats(&c, s).unwrap();
+        assert_eq!((list.len(), list[0].turns), (1, 2));
+        let turns = chat_turns(&c, ch).unwrap();
+        assert_eq!(turns[0].q, "k1");
+        assert_eq!(turns[0].sources[0]["n"], 1);
+        delete_chat(&c, ch).unwrap();
+        assert!(chat_turns(&c, ch).unwrap().is_empty());
         set_page_text(&c, d, 2, "Sprite multiplexer javítva").unwrap();
         assert_eq!(search(&c, s, "javitva", 10).unwrap().len(), 1);
         delete_skill(&c, s).unwrap();

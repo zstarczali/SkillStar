@@ -7,6 +7,7 @@ mod extract;
 mod ocr;
 mod pdf;
 mod process;
+mod rag;
 mod settings;
 mod skill;
 mod update;
@@ -129,6 +130,11 @@ pub fn run() {
             commands::pdfium_download,
             commands::pdfium_test,
             commands::reveal_in_explorer,
+            commands::page_image,
+            commands::chat_list,
+            commands::chat_turns,
+            commands::chat_rename,
+            commands::chat_delete,
             commands::open_file,
             commands::open_url,
             commands::exe_path,

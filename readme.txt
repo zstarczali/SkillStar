@@ -1,12 +1,12 @@
 SkillStar Installation Guide
 ===========================
 
-Version 0.1.0
+Version 1.0.0
 -------------
-First version. Give SkillStar DOCX, PDF, PPTX, ODT, HTML, Markdown or
-text files (scanned PDFs too: they are read with OCR), and it builds a
-Claude skill package from them. See whatsnew.txt for the release
-history.
+Skill packages for Claude, Agent Skills (Codex, Gemini CLI, Copilot,
+Cursor), ChatGPT, Gemini, DeepSeek and RAG; questions answered from the
+documents with clickable [n] citations; OCR language per document and
+re-OCR. See whatsnew.txt for the release history.
 
 The main-window Donate button appears after 10 minutes of foreground
 use. The timer pauses while the window is unfocused or hidden and
@@ -99,12 +99,18 @@ language with its optical character recognition feature), elsewhere, or
 if you prefer it, with Tesseract (install it and set it in Settings >
 Extraction). An interrupted OCR run continues where it stopped.
 
-Using the package
------------------
-SkillStar writes three things for every skill:
-- a folder with the Claude Code plugin (.claude-plugin/plugin.json,
-  skills/<name>/SKILL.md, knowledge/...): copy the skill folder into
-  ~/.claude/skills, or add the plugin folder;
-- <name>.plugin: the same plugin as one file;
-- <name>-skill.zip: upload it at claude.ai > Settings > Capabilities >
-  Skills.
+Using the packages
+------------------
+Choose the formats on the skill page or above the package preview.
+Every format goes into its own folder of the output folder, each with
+a README.md that explains the steps:
+- claude/: Claude Code plugin folder, <name>.plugin and
+  <name>-skill.zip (claude.ai > Settings > Capabilities > Skills);
+- agents/: Agent Skills folder + ZIP (OpenAI Codex, Gemini CLI, GitHub
+  Copilot, Cursor);
+- chatgpt/: instructions.md + knowledge files for a Custom GPT or a
+  ChatGPT Project;
+- gemini/: instructions.md + knowledge files for a Gem;
+- deepseek/: system prompt + the text cut into context-sized parts;
+- rag/: chunks.jsonl, documents.json and a system prompt for any LLM
+  and vector store.

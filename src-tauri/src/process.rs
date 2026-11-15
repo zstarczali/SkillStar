@@ -156,7 +156,7 @@ impl Worker {
             }
         };
         let o = Opts {
-            ocr: crate::commands::ocr_cfg(&s),
+            ocr: crate::commands::ocr_cfg_doc(&s, &doc.ocr_lang),
             ocr_mode: if s.ocr_engine == "off" && doc.ocr_mode != "off" { "off" } else { doc.ocr_mode.as_str() },
             dpi: s.ocr_dpi,
             min_chars: s.ocr_min_chars,

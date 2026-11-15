@@ -1,6 +1,26 @@
 SkillStar - What's new
 ======================
 
+1.0.0
+-----
+- Package formats, chosen per skill, each in its own folder: Claude
+  (Claude Code plugin folder, .plugin file, claude.ai skill ZIP), Agent
+  Skills (Codex, Gemini CLI, Copilot, Cursor), ChatGPT (Custom GPT /
+  Project), Gemini Gem, DeepSeek and RAG (chunks.jsonl for any LLM and
+  vector store). The package preview shows the folders.
+- Ask the documents in RAG mode: the AI writes extra search queries
+  (synonyms, inflected and other-language forms), the local full-text
+  index finds the passages, and the answer cites them as [n] - click a
+  citation or a source to open the page. One skill or every skill.
+- OCR language per document (Windows OCR language or Tesseract
+  languages), and "Re-OCR with another language" for one or more
+  documents. When the Hungarian OCR language is missing, the dialog
+  shows how to install it.
+- The AI theme is now "Neon", with a lot more glow.
+- The PDF / OCR status is a small indicator in the status bar.
+- Fix: in the light theme the red Stop button turned white on hover.
+- Fix: a long skill name no longer pushes the toolbar buttons away.
+
 0.1.0
 -----
 - First version: turns a pile of DOCX, PDF, PPTX, ODT, HTML, Markdown
