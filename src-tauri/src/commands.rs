@@ -627,12 +627,15 @@ pub struct AskResult {
     pub sources: Vec<rag::Passage>,
     /// the search queries used (the question first)
     pub queries: Vec<String>,
+    /// web pages found by the web search ([Wn] = web[n-1])
+    pub web: Vec<ai::WebSource>,
 }
 
 /// AI in RAG mode: (AI-written extra search queries) → local full-text retrieval
 /// → numbered passages → answer with [n] citations. `all`: every skill.
 #[tauri::command]
-pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>, chat: Option<i64>) -> Result<AskResult, String> {
+pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>, chat: Option<i64>, web: Option<bool>) -> Result<AskResult, String> {
+    let use_web = web.unwrap_or(false);
     let cfg = state.settings.get();
     ai_check(&cfg)?;
     let question = question.trim().to_string();
@@ -674,13 +677,13 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
     let skill = if all.unwrap_or(false) { 0 } else { id };
     let qs = queries.clone();
     let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, 14, 60_000))?;
-    if sources.is_empty() {
+    if sources.is_empty() && !use_web {
         let text = tr(
-            "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, vagy kapcsold be a „Keresés bővítése AI-val” lehetőséget.",
-            "The search found no page that fits the question. Try other words, or turn on “Expand the search with AI”.",
+            "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, kapcsold be a „Keresés bővítése AI-val” lehetőséget, vagy keress a weben is.",
+            "The search found no page that fits the question. Try other words, turn on “Expand the search with AI”, or search the web too.",
         );
-        let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
-        return Ok(AskResult { chat_id, text, sources, queries });
+        let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &[])?;
+        return Ok(AskResult { chat_id, text, sources, queries, web: vec![] });
     }
     let mut user = rag::context(&sources);
     if !recent.is_empty() {
@@ -692,14 +695,32 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
         user.push_str("</conversation>\n");
     }
     user.push_str(&format!("\nQuestion: {question}"));
-    let text = ai_run(&cfg, ai::ask_system(&cfg.ai_language), user, 8000).await?;
-    let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
-    Ok(AskResult { chat_id, text, sources, queries })
+    let (text, pages) = if use_web {
+        ai::complete_web(
+            ai::AiRequest {
+                provider: &cfg.ai_provider,
+                api_key: cfg.ai_key(),
+                model: cfg.ai_model_id(),
+                system: ai::ask_system(&cfg.ai_language, true),
+                user,
+                effort: "medium",
+                max_tokens: 12000,
+            },
+            4,
+        )
+        .await?
+    } else {
+        (ai_run(&cfg, ai::ask_system(&cfg.ai_language, false), user, 8000).await?, vec![])
+    };
+    let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &pages)?;
+    Ok(AskResult { chat_id, text, sources, queries, web: pages })
 }
 
 /// Saves a question + answer into the conversation (a new one, named after the first question).
-fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &str, sources: &[rag::Passage], queries: &[String]) -> Result<i64, String> {
+#[allow(clippy::too_many_arguments)]
+fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &str, sources: &[rag::Passage], queries: &[String], web: &[ai::WebSource]) -> Result<i64, String> {
     let src = serde_json::to_string(sources).unwrap_or_else(|_| "[]".into());
+    let wb = serde_json::to_string(web).unwrap_or_else(|_| "[]".into());
     let qs = serde_json::to_string(queries).unwrap_or_else(|_| "[]".into());
     state.with_db(|c| {
         let id = match chat {
@@ -712,7 +733,7 @@ fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &st
                 db::create_chat(c, skill_id, &title)?
             }
         };
-        db::add_chat_turn(c, id, q, a, &src, &qs)?;
+        db::add_chat_turn(c, id, q, a, &src, &qs, &wb)?;
         Ok(id)
     })
 }

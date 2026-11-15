@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
   a TEXT NOT NULL,
   sources TEXT NOT NULL DEFAULT '[]',
   queries TEXT NOT NULL DEFAULT '[]',
+  web TEXT NOT NULL DEFAULT '[]',
   created INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_turns_chat ON chat_turns(chat_id, id);
@@ -496,6 +497,8 @@ pub struct ChatTurn {
     /// rag::Passage list as JSON
     pub sources: serde_json::Value,
     pub queries: serde_json::Value,
+    /// ai::WebSource list as JSON
+    pub web: serde_json::Value,
     pub created: i64,
 }
 
@@ -511,7 +514,7 @@ pub fn chats(c: &Connection, skill_id: i64) -> Result<Vec<Chat>, String> {
 }
 
 pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String> {
-    let mut st = c.prepare("SELECT id, q, a, sources, queries, created FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
+    let mut st = c.prepare("SELECT id, q, a, sources, queries, created, web FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
     let rows = st
         .query_map([chat_id], |r| {
             let src: String = r.get(3)?;
@@ -523,6 +526,7 @@ pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String>
                 sources: serde_json::from_str(&src).unwrap_or(serde_json::Value::Array(vec![])),
                 queries: serde_json::from_str(&qs).unwrap_or(serde_json::Value::Array(vec![])),
                 created: r.get(5)?,
+                web: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or(serde_json::Value::Array(vec![])),
             })
         })
         .map_err(e)?;
@@ -535,11 +539,11 @@ pub fn create_chat(c: &Connection, skill_id: i64, title: &str) -> Result<i64, St
     Ok(c.last_insert_rowid())
 }
 
-pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str) -> Result<(), String> {
+pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str, web: &str) -> Result<(), String> {
     let t = now();
     c.execute(
-        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![chat_id, q, a, sources, queries, t],
+        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created, web) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![chat_id, q, a, sources, queries, t, web],
     )
     .map_err(e)?;
     c.execute("UPDATE chats SET updated=?2 WHERE id=?1", params![chat_id, t]).map_err(e)?;
@@ -691,8 +695,8 @@ mod tests {
         assert_eq!(document(&c, d).unwrap().partial, 0);
         // conversations: newest first, turns in order, removed with the chat
         let ch = create_chat(&c, s, "Első kérdés").unwrap();
-        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#).unwrap();
-        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]").unwrap();
+        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#, "[]").unwrap();
+        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]", r#"[{"n":1,"url":"u"}]"#).unwrap();
         let list = chats(&c, s).unwrap();
         assert_eq!((list.len(), list[0].turns), (1, 2));
         let turns = chat_turns(&c, ch).unwrap();

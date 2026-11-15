@@ -2,7 +2,7 @@
 // AI panel, about, self-update. The views of a skill: skills.js.
 
 import {
-  invoke, h, icon, toast, modal, confirmDlg, debounce,
+  invoke, h, icon, toast, modal, confirmDlg, debounce, relTime, fmtDate,
   initUiState, uiGet, uiSet, editMenu, splitter,
 } from './util.js';
 import { t, setLang, getLang } from './i18n.js';
@@ -468,7 +468,11 @@ function renderWelcome(el) {
 
 // ───────────────────────── AI panel ─────────────────────────
 
-function aiPanel(title, run, presets = [], extra = null) {
+/**
+ * The RAG chat panel. `run(question, chatId)` answers; conversations are saved per skill
+ * (`chat` = { list(), load(id), remove(id) }) and can be reopened and continued.
+ */
+function aiPanel(title, run, presets = [], extra = null, chat = null) {
   document.querySelector('.ai-panel')?.remove();
   if (!aiOn()) { toast(t('Az AI funkciók ki vannak kapcsolva (Beállítások → AI).'), 'err'); return null; }
   if (!aiKey()) {
@@ -476,10 +480,12 @@ function aiPanel(title, run, presets = [], extra = null) {
     settingsDlg('ai');
     return null;
   }
-  const history = [];
+  let chatId = null;
   const body = h('div.ai-body');
   const input = h('textarea.inp.ai-ask', { rows: 2, placeholder: t('Kérdezz a dokumentumokból… (Enter: küldés, Shift+Enter: új sor)') });
   const send = h('button.btn.sm.ai', { on: { click: () => ask(input.value.trim()) } }, icon('sparkle'), t('Küldés'));
+  const presetBox = presets.length ? h('div.ai-presets', presets.map((p) => h('button.btn.sm', { on: { click: () => ask(p) } }, p))) : null;
+  const sub = h('span.sub', ` · ${aiModel() || aiProviderName()}`);
   let busy = false;
   const ask = async (q) => {
     if (busy || !q) return;
@@ -491,56 +497,143 @@ function aiPanel(title, run, presets = [], extra = null) {
     body.append(wait);
     wait.scrollIntoView({ block: 'end' });
     try {
-      const res = await run(q, history.slice());
+      const res = await run(q, chatId);
       wait.remove();
-      history.push({ q, a: res.text });
-      const out = h('div.ai-ans', { html: mdRender(res.text) });
-      if (res.sources) citeLinks(out, res.sources);
-      out.addEventListener('click', (e) => {
-        const c = e.target.closest('a.cite');
-        if (c) { e.preventDefault(); openSource(res.sources[Number(c.dataset.n) - 1]); return; }
-        const a = e.target.closest('a[href]');
-        if (!a) return;
-        e.preventDefault();
-        if (/^(https?|mailto):/i.test(a.getAttribute('href'))) invoke('open_url', { url: a.getAttribute('href') }).catch(err);
-      });
-      if (res.queries?.length > 1) body.append(h('div.rag-q', icon('search'), t('Keresések:'), ...res.queries.map((x) => h('span', x))));
-      body.append(out);
-      if (res.sources?.length) body.append(sourceList(res));
+      if (res.chat_id) chatId = res.chat_id;
+      const out = renderAnswer(body, res);
       out.scrollIntoView({ block: 'start' });
+      if (presetBox) presetBox.hidden = true;
     } catch (e) {
       wait.replaceWith(h('div', { style: { color: 'var(--danger)' } }, String(e)));
     } finally { busy = false; send.disabled = false; input.focus(); }
   };
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(input.value.trim()); } });
+
+  const fresh = () => {
+    chatId = null;
+    body.replaceChildren();
+    if (presetBox) presetBox.hidden = false;
+    hist.hidden = true;
+    input.focus();
+  };
+  const open = async (c) => {
+    hist.hidden = true;
+    try {
+      const turns = await chat.load(c.id);
+      chatId = c.id;
+      body.replaceChildren(h('div.ai-chat-h', icon('history'), h('span', c.title), h('span.grow'), h('span.sub', fmtDate(c.updated, true))));
+      for (const tn of turns) {
+        body.append(h('div.ai-q', tn.q));
+        renderAnswer(body, { text: tn.a, sources: tn.sources || [], queries: tn.queries || [], web: tn.web || [] });
+      }
+      if (presetBox) presetBox.hidden = true;
+      body.lastElementChild?.scrollIntoView({ block: 'end' });
+      input.focus();
+    } catch (e) { err(e); }
+  };
+  const hist = h('div.ai-hist', { hidden: true });
+  const showHist = async () => {
+    if (!hist.hidden) { hist.hidden = true; return; }
+    let list = [];
+    try { list = await chat.list(); } catch (e) { err(e); return; }
+    const filter = h('input.inp.sm', { placeholder: t('Szűrés…'), on: { input: () => draw() } });
+    const rows = h('div.ai-hist-list');
+    const draw = () => {
+      const f = filter.value.trim().toLowerCase();
+      const shown = list.filter((c) => !f || c.title.toLowerCase().includes(f));
+      rows.replaceChildren(...(shown.length ? shown.map((c) => h('div.ai-hist-row', { class: c.id === chatId ? 'on' : '', title: c.title, on: { click: () => open(c) } },
+        h('span.tt', c.title),
+        h('span.meta', t('{0} kérdés', c.turns), ' · ', relTime(c.updated)),
+        h('button.icon-btn.sm', { title: t('Átnevezés'), on: { click: async (e) => {
+          e.stopPropagation();
+          const name = await promptDlg(t('Beszélgetés átnevezése'), c.title);
+          if (!name) return;
+          try { await chat.rename(c.id, name); c.title = name; draw(); } catch (x) { err(x); }
+        } } }, icon('rename')),
+        h('button.icon-btn.sm', { title: t('Törlés'), on: { click: async (e) => {
+          e.stopPropagation();
+          if (!(await confirmDlg(t('Beszélgetés törlése'), t('Törlöd a(z) „{0}” beszélgetést? Nem vonható vissza.', c.title), t('Törlés'), true))) return;
+          try {
+            await chat.remove(c.id);
+            list = list.filter((x) => x.id !== c.id);
+            if (c.id === chatId) fresh();
+            draw();
+          } catch (x) { err(x); }
+        } } }, icon('trash')))) : [h('div.ai-hist-empty', list.length ? t('Nincs találat.') : t('Még nincs mentett beszélgetés ebben a skillben.'))]));
+    };
+    hist.replaceChildren(h('div.ai-hist-top', h('b', t('Korábbi beszélgetések')), h('span.grow'), filter), rows);
+    draw();
+    hist.hidden = false;
+    filter.focus();
+  };
   const panel = h('div.ai-panel',
-    h('div.pane-h', h('span.spark', icon('sparkle')), title, h('span.sub', ` · ${aiModel() || aiProviderName()}`), h('span.grow'),
+    h('div.pane-h', h('span.spark', icon('sparkle')), title, sub, h('span.grow'),
+      chat ? h('button.icon-btn', { title: t('Új beszélgetés'), on: { click: fresh } }, icon('plus')) : null,
+      chat ? h('button.icon-btn', { title: t('Korábbi beszélgetések'), on: { click: showHist } }, icon('history')) : null,
       h('button.icon-btn', { title: t('Szöveg másolása'), on: { click: () => navigator.clipboard.writeText(body.innerText).then(() => toast(t('Vágólapra másolva'), 'ok', 1500)) } }, icon('copy')),
       h('button.icon-btn', { title: t('Bezárás (Esc)'), on: { click: () => panel.remove() } }, icon('close'))),
+    hist,
     body,
-    h('div.ai-foot', extra,
-      presets.length ? h('div.ai-presets', presets.map((p) => h('button.btn.sm', { on: { click: () => ask(p) } }, p))) : null,
-      h('div.ai-askrow', input, send)));
+    h('div.ai-foot', extra, presetBox, h('div.ai-askrow', input, send)));
   document.body.append(panel);
-  return { ask, input };
+  return { ask, input, open };
+}
+
+/** Small text prompt dialog. */
+async function promptDlg(title, value) {
+  const inp = h('input.inp', { value });
+  const v = await modal({ title, body: inp, buttons: [{ label: t('Mégse'), value: null }, { label: t('Mentés'), primary: true, value: () => inp.value.trim() || null }] });
+  return v || null;
+}
+
+/** One answer: searches, Markdown with clickable citations, source mix, sources and web pages. */
+function renderAnswer(body, res) {
+  const out = h('div.ai-ans', { html: mdRender(res.text) });
+  citeLinks(out, res.sources || [], res.web || []);
+  out.addEventListener('click', (e) => {
+    const c = e.target.closest('a.cite');
+    if (c) {
+      e.preventDefault();
+      if (c.dataset.w) { const w = res.web[Number(c.dataset.w) - 1]; if (w) invoke('open_url', { url: w.url }).catch(err); } else openSource(res.sources[Number(c.dataset.n) - 1]);
+      return;
+    }
+    const a = e.target.closest('a[href]');
+    if (!a) return;
+    e.preventDefault();
+    if (/^(https?|mailto):/i.test(a.getAttribute('href'))) invoke('open_url', { url: a.getAttribute('href') }).catch(err);
+  });
+  if (res.queries?.length > 1) body.append(h('div.rag-q', icon('search'), t('Keresések:'), ...res.queries.map((x) => h('span', x))));
+  body.append(out);
+  const mix = mixBar(res.text);
+  if (mix) body.append(mix);
+  if (res.sources?.length) body.append(sourceList(res));
+  if (res.web?.length) body.append(webList(res));
+  return out;
 }
 
 // ───────────────────────── RAG answers: [n] citations → sources ─────────────────────────
 
 /** [1], [2][4], [1, 3] in the answer → clickable citation marks (outside code). */
-function citeLinks(root, sources) {
+function citeLinks(root, sources, web = []) {
+  const RE = /\[(W\d+|\d+(?:\s*[,;]\s*\d+)*)\]/g;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest('code, pre, a') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
   const nodes = [];
-  while (walker.nextNode()) if (/\[\d+(?:\s*[,;]\s*\d+)*\]/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+  while (walker.nextNode()) if (/\[(W\d+|\d+(?:\s*[,;]\s*\d+)*)\]/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
   for (const n of nodes) {
     const frag = document.createDocumentFragment();
     let last = 0;
     const txt = n.nodeValue;
-    txt.replace(/\[(\d+(?:\s*[,;]\s*\d+)*)\]/g, (m, list, at) => {
+    txt.replace(RE, (m, list, at) => {
       frag.append(txt.slice(last, at));
-      for (const num of list.split(/[,;]/).map((x) => Number(x.trim()))) {
-        const s = sources[num - 1];
-        frag.append(s ? h('a.cite', { href: '#', 'data-n': String(num), title: `${s.doc} – ${t('{0}. oldal', s.page)}` }, String(num)) : `[${num}]`);
+      if (list[0] === 'W') {
+        const num = Number(list.slice(1));
+        const w = web[num - 1];
+        frag.append(w ? h('a.cite.web', { href: '#', 'data-w': String(num), title: `${w.title || w.url}\n${w.url}` }, 'W' + num) : m);
+      } else {
+        for (const num of list.split(/[,;]/).map((x) => Number(x.trim()))) {
+          const s = sources[num - 1];
+          frag.append(s ? h('a.cite', { href: '#', 'data-n': String(num), title: `${s.doc} – ${t('{0}. oldal', s.page)}` }, String(num)) : `[${num}]`);
+        }
       }
       last = at + m.length;
       return m;
@@ -548,6 +641,62 @@ function citeLinks(root, sources) {
     frag.append(txt.slice(last));
     n.replaceWith(frag);
   }
+}
+
+/**
+ * How much of the answer comes from the documents ([n]), from the web ([Wn]) and from
+ * elsewhere (the model's own knowledge, no citation): sentences weighted by length.
+ */
+function sourceMix(text) {
+  const sum = { kb: 0, web: 0, other: 0 };
+  let code = false;
+  let prev = 'other';
+  for (const line of text.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) { code = !code; continue; }
+    // a code block belongs to the sentence that introduces it
+    if (code) { sum[prev] += Math.min(line.trim().length, 120); continue; }
+    if (/^\s*(#{1,6}\s|\|?\s*:?-{3,})/.test(line)) continue;
+    // split into sentences, but never before a citation mark
+    for (const seg of line.split(/(?<=[.!?])\s+(?=[^[\s])/)) {
+      const plain = seg.replace(/\[(W\d+|\d+(?:\s*[,;]\s*\d+)*)\]/g, '').replace(/[*_`>|#-]/g, '').trim();
+      if (plain.length < 3) continue;
+      const kb = /\[\d+(?:\s*[,;]\s*\d+)*\]/.test(seg);
+      const web = /\[W\d+\]/.test(seg);
+      if (kb && web) { sum.kb += plain.length / 2; sum.web += plain.length / 2; prev = 'kb'; } else {
+        prev = kb ? 'kb' : web ? 'web' : 'other';
+        sum[prev] += plain.length;
+      }
+    }
+  }
+  const total = sum.kb + sum.web + sum.other;
+  if (!total) return null;
+  const pct = { kb: Math.round((sum.kb / total) * 100), web: Math.round((sum.web / total) * 100) };
+  pct.other = Math.max(0, 100 - pct.kb - pct.web);
+  return pct;
+}
+
+function mixBar(text) {
+  const p = sourceMix(text);
+  if (!p) return null;
+  const parts = [
+    ['kb', t('Tudásbázis'), t('Mondatok, amelyekhez a dokumentumokból hivatkozás tartozik [n]')],
+    ['web', t('Web'), t('Mondatok, amelyek a webes keresés találataira hivatkoznak [Wn]')],
+    ['other', t('Egyéb'), t('Hivatkozás nélküli mondatok: az AI saját tudása, összekötő szöveg – ezeket nem támasztja alá forrás')],
+  ];
+  return h('div.mix', { title: t('Honnan származik a válasz (a mondatok hossza alapján, a hivatkozások szerint)') },
+    h('div.mix-bar', parts.filter(([k]) => p[k] > 0).map(([k, label]) => h('span.mix-' + k, { style: { width: p[k] + '%' }, title: `${label}: ${p[k]}%` }))),
+    h('div.mix-leg', parts.map(([k, label, tip]) => h('span.mix-l', { class: p[k] ? '' : 'zero', title: tip }, h('i.mix-' + k), label, h('b', p[k] + '%')))));
+}
+
+function webList(res) {
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+  const row = (w) => h('div.src.web', { title: w.url, on: { click: () => invoke('open_url', { url: w.url }).catch(err) } },
+    h('span.n', 'W' + w.n), h('span.d', w.title || host(w.url)), h('span.p', host(w.url)),
+    h('span.x', (w.text || w.url).replace(/\s+/g, ' ').slice(0, 160)));
+  const cited = res.web.filter((w) => w.cited);
+  const rest = res.web.filter((w) => !w.cited);
+  return h('div.srcs', h('div.srcs-h', icon('globe'), t('Webes források')), cited.map(row),
+    rest.length ? h('details.src-more', h('summary', t('További {0} talált oldal', rest.length)), rest.map(row)) : null);
 }
 
 function sourceList(res) {
@@ -577,18 +726,25 @@ async function openSource(s) {
 function aiAsk(q) {
   const sk = curSkill();
   if (!sk) return;
-  const opt = { all: !!uiGet('rag.all'), expand: uiGet('rag.expand') !== false };
-  const sw = (key, label, title) => {
-    const e = h('input', { type: 'checkbox', checked: opt[key] });
+  const webOk = !isDeepSeek() && !isClaudeCli();
+  const opt = { all: !!uiGet('rag.all'), expand: uiGet('rag.expand') !== false, web: webOk && uiGet('rag.web') === true };
+  const sw = (key, label, title, disabled = false) => {
+    const e = h('input', { type: 'checkbox', checked: opt[key], disabled });
     e.addEventListener('change', () => { opt[key] = e.checked; uiSet('rag.' + key, e.checked); });
-    return h('label.chk.rag-opt', { title }, e, label);
+    return h('label.chk.rag-opt', { title, class: disabled ? 'off' : '' }, e, label);
   };
   const extra = h('div.rag-opts',
     h('span.rag-badge', 'RAG'),
     sw('expand', t('Keresés bővítése AI-val'), t('Az AI előbb keresőkifejezéseket ír (szinonimák, ragozott és idegen nyelvű alakok), így több releváns oldalt talál; +1 rövid AI-hívás')),
-    S.skills.length > 1 ? sw('all', t('Minden skillben'), t('A keresés az összes skill dokumentumaiban')) : null);
-  const p = aiPanel(t('AI – {0}', sk.title), (question, history) => invoke('ai_ask', { id: sk.id, question, history, all: opt.all, expand: opt.expand }),
-    [t('Miről szólnak ezek a dokumentumok?'), t('Milyen kérdésekre tud válaszolni ez a skill?')], extra);
+    S.skills.length > 1 ? sw('all', t('Minden skillben'), t('A keresés az összes skill dokumentumaiban')) : null,
+    sw('web', t('Keresés a weben is'), webOk ? t('Ha a dokumentumok nem elegendők, az AI a weben is keres (Anthropic webes keresés, keresésenként díjköteles); a webes állítások [Wn] hivatkozást kapnak') : t('A webes keresés csak az Anthropic API-val működik (Beállítások → AI).'), !webOk));
+  const p = aiPanel(t('AI – {0}', sk.title), (question, chat) => invoke('ai_ask', { id: sk.id, question, chat, all: opt.all, expand: opt.expand, web: opt.web }),
+    [t('Miről szólnak ezek a dokumentumok?'), t('Milyen kérdésekre tud válaszolni ez a skill?')], extra, {
+      list: () => invoke('chat_list', { skillId: sk.id }),
+      load: (id) => invoke('chat_turns', { id }),
+      rename: (id, title) => invoke('chat_rename', { id, title }),
+      remove: (id) => invoke('chat_delete', { id }),
+    });
   if (!p) return;
   if (q) p.ask(q); else p.input.focus();
 }

@@ -43,36 +43,68 @@ pub async fn complete(req: AiRequest<'_>) -> Result<String, String> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    if req.api_key.trim().is_empty() {
-        return Err(tr("Nincs megadva Anthropic API kulcs (Beállítások → AI).", "No Anthropic API key is set (Settings → AI)."));
-    }
+    let body = anthropic_body(&req, json!([{ "role": "user", "content": req.user }]));
+    let v = anthropic_post(req.api_key, req.model, &body).await?;
+    let text: String = v["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    finish_text(text, &v)
+}
+
+fn anthropic_body(req: &AiRequest<'_>, messages: Value) -> Value {
     let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
         "system": req.system,
-        "messages": [{ "role": "user", "content": req.user }],
+        "messages": messages,
     });
     if supports_effort(req.model) {
         body["output_config"] = json!({ "effort": req.effort });
     }
-    let fallback = supports_fallback(req.model);
-    if fallback {
+    if supports_fallback(req.model) {
         body["fallbacks"] = json!("default");
     }
+    body
+}
 
+fn finish_text(text: String, v: &Value) -> Result<String, String> {
+    if text.trim().is_empty() {
+        return Err(tr("Üres válasz érkezett a modelltől.", "The model returned an empty response."));
+    }
+    let mut text = text.trim().to_string();
+    if v["stop_reason"].as_str() == Some("max_tokens") {
+        text.push_str(&tr("\n\n_(A válasz a maximális hossznál megszakadt.)_", "\n\n_(The answer was cut at the maximum length.)_"));
+    }
+    Ok(text)
+}
+
+/// One Messages API call; HTTP errors and refusals become readable errors.
+async fn anthropic_post(api_key: &str, model: &str, body: &Value) -> Result<Value, String> {
+    if api_key.trim().is_empty() {
+        return Err(tr("Nincs megadva Anthropic API kulcs (Beállítások → AI).", "No Anthropic API key is set (Settings → AI)."));
+    }
+    let fallback = supports_fallback(model);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
     let mut http = client
         .post(API_URL)
-        .header("x-api-key", req.api_key.trim())
+        .header("x-api-key", api_key.trim())
         .header("anthropic-version", API_VERSION)
         .header("content-type", "application/json");
     if fallback {
         http = http.header("anthropic-beta", FALLBACK_BETA);
     }
-    let resp = http.json(&body).send().await.map_err(|e| format!("{}: {e}", tr("Hálózati hiba", "Network error")))?;
+    let resp = http.json(body).send().await.map_err(|e| format!("{}: {e}", tr("Hálózati hiba", "Network error")))?;
     let status = resp.status();
     let v: Value = resp.json().await.map_err(|e| format!("{}: {e}", tr("Hibás válasz", "Invalid response")))?;
     if !status.is_success() {
@@ -90,25 +122,129 @@ pub async fn complete(req: AiRequest<'_>) -> Result<String, String> {
         let expl = v["stop_details"]["explanation"].as_str().unwrap_or("");
         return Err(format!("{} {expl}", tr("A modell elutasította a kérést.", "The model declined the request.")));
     }
-    let text: String = v["content"]
-        .as_array()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b["type"] == "text")
-                .filter_map(|b| b["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
-    if text.trim().is_empty() {
-        return Err(tr("Üres válasz érkezett a modelltől.", "The model returned an empty response."));
+    Ok(v)
+}
+
+/// A web page the answer used (cited as [Wn]).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+pub struct WebSource {
+    pub n: usize,
+    pub url: String,
+    pub title: String,
+    /// the cited text (empty if the page was found but not cited)
+    pub text: String,
+    pub cited: bool,
+}
+
+/// Web search tool version the model accepts (dynamic filtering on newer models).
+fn web_tool(model: &str) -> &'static str {
+    let new = ["claude-fable", "claude-mythos", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6"];
+    if new.iter().any(|p| model.starts_with(p)) {
+        "web_search_20260209"
+    } else {
+        "web_search_20250305"
     }
-    let mut text = text.trim().to_string();
-    if v["stop_reason"].as_str() == Some("max_tokens") {
-        text.push_str(&tr("\n\n_(A válasz a maximális hossznál megszakadt.)_", "\n\n_(The answer was cut at the maximum length.)_"));
+}
+
+/// Anthropic call with the server-side web search tool: the answer text with
+/// [Wn] marks after every web-cited part, and the pages it found.
+pub async fn complete_web(req: AiRequest<'_>, max_uses: u32) -> Result<(String, Vec<WebSource>), String> {
+    if req.provider != "anthropic" && !req.provider.is_empty() {
+        return Err(tr("A webes keresés csak az Anthropic API-val működik (Beállítások → AI).", "Web search works only with the Anthropic API (Settings → AI)."));
     }
-    Ok(text)
+    let mut messages = vec![json!({ "role": "user", "content": req.user })];
+    let mut blocks: Vec<Value> = vec![];
+    let mut last = Value::Null;
+    // the server pauses long searching turns; the content is sent back to continue
+    for _ in 0..4 {
+        let mut body = anthropic_body(&req, Value::Array(messages.clone()));
+        body["tools"] = json!([{ "type": web_tool(req.model), "name": "web_search", "max_uses": max_uses }]);
+        let v = anthropic_post(req.api_key, req.model, &body).await?;
+        let content = v["content"].as_array().cloned().unwrap_or_default();
+        blocks.extend(content.iter().cloned());
+        let paused = v["stop_reason"].as_str() == Some("pause_turn");
+        last = v;
+        if !paused {
+            break;
+        }
+        messages.push(json!({ "role": "assistant", "content": content }));
+    }
+    let mut web: Vec<WebSource> = vec![];
+    let mut text = String::new();
+    for b in &blocks {
+        match b["type"].as_str() {
+            Some("web_search_tool_result") => {
+                // a list on success, an error object otherwise
+                for r in b["content"].as_array().into_iter().flatten() {
+                    let url = r["url"].as_str().unwrap_or("").to_string();
+                    if !url.is_empty() && !web.iter().any(|w| w.url == url) {
+                        web.push(WebSource { url, title: r["title"].as_str().unwrap_or("").to_string(), ..Default::default() });
+                    }
+                }
+            }
+            Some("text") => {
+                text.push_str(b["text"].as_str().unwrap_or(""));
+                let mut marks: Vec<usize> = vec![];
+                for c in b["citations"].as_array().into_iter().flatten() {
+                    if c["type"] != "web_search_result_location" {
+                        continue;
+                    }
+                    let url = c["url"].as_str().unwrap_or("").to_string();
+                    let i = match web.iter().position(|w| w.url == url) {
+                        Some(i) => i,
+                        None => {
+                            web.push(WebSource { url: url.clone(), title: c["title"].as_str().unwrap_or("").to_string(), ..Default::default() });
+                            web.len() - 1
+                        }
+                    };
+                    let w = &mut web[i];
+                    w.cited = true;
+                    let quote = c["cited_text"].as_str().unwrap_or("");
+                    if w.text.chars().count() < 600 && !quote.is_empty() && !w.text.contains(quote) {
+                        if !w.text.is_empty() {
+                            w.text.push_str(" … ");
+                        }
+                        w.text.push_str(quote);
+                    }
+                    if !marks.contains(&i) {
+                        marks.push(i);
+                    }
+                }
+                // cited pages first get numbers in the order the answer cites them
+                for i in marks {
+                    if web[i].n == 0 {
+                        web[i].n = web.iter().filter(|w| w.n > 0).count() + 1;
+                    }
+                    let n = web[i].n;
+                    let mark = format!("[W{n}]");
+                    if !text.ends_with(&mark) {
+                        // before the trailing punctuation of the cited part
+                        let trimmed = text.trim_end();
+                        text.truncate(trimmed.len());
+                        text.push_str(&mark);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut next = web.iter().filter(|w| w.n > 0).count();
+    for w in web.iter_mut().filter(|w| w.n == 0) {
+        next += 1;
+        w.n = next;
+    }
+    web.sort_by_key(|w| w.n);
+    let text = finish_text(text, &last)?;
+    Ok((text, web))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn web_tool_versions() {
+        assert_eq!(super::web_tool("claude-opus-5-5"), "web_search_20260209");
+        assert_eq!(super::web_tool("claude-haiku-4-5"), "web_search_20250305");
+    }
 }
 
 /// DeepSeek: OpenAI-compatible chat completions API, Bearer key.
@@ -188,9 +324,22 @@ pub fn skill_desc_system(lang: &str) -> String {
 }
 
 /// RAG answer: numbered passages in, Markdown answer with [n] citations out.
-pub fn ask_system(lang: &str) -> String {
+pub fn ask_system(lang: &str, web: bool) -> String {
+    let extra = if web {
+        " You can also search the web: use it when the passages do not answer the question fully or the question needs \
+         current information. Web results are cited automatically; never give them passage numbers."
+    } else {
+        ""
+    };
     format!(
-        "You answer questions from a document collection (retrieval-augmented generation). The user message holds          numbered passages retrieved from the documents inside <passages> (<passage n=\"…\" document=\"…\" page=\"…\">),          possibly the earlier conversation, and the question. Answer in {lang}, as Markdown, using ONLY the passages.          Put the passage number in square brackets after every claim it supports: [1], [2][4]. Do not cite documents          in any other way and never invent passage numbers. If the passages do not contain the answer, say so plainly          and suggest other search words. Quote verbatim when the exact wording matters. Text read with OCR may contain          character errors.",
+        "You answer questions from a document collection (retrieval-augmented generation). The user message holds \
+         numbered passages retrieved from the documents inside <passages> (<passage n=\"…\" document=\"…\" page=\"…\">), \
+         possibly the earlier conversation, and the question. Answer in {lang}, as Markdown. Base the answer on the \
+         passages first, and put the passage number in square brackets after every claim a passage supports: [1], \
+         [2][4]. Do not cite documents in any other way and never invent passage numbers or put them on claims the \
+         passages do not support. If the passages do not cover something, say so; you may add what you know \
+         yourself, as separate sentences without a passage number.{extra} Quote verbatim when the exact wording \
+         matters. Text read with OCR may contain character errors.",
         lang = lang_name(lang)
     )
 }
