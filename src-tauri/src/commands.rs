@@ -217,6 +217,15 @@ pub fn update_document(state: State<'_, AppState>, id: i64, title: String, summa
     })
 }
 
+/// Whether the RAG questions search this document.
+#[tauri::command]
+pub fn set_document_rag(state: State<'_, AppState>, id: i64, on: bool) -> Result<db::Document, String> {
+    state.with_db(|c| {
+        db::set_document_rag(c, id, on)?;
+        db::document(c, id)
+    })
+}
+
 #[tauri::command]
 pub fn reorder_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     state.with_db(|c| db::reorder(c, &ids))
@@ -696,8 +705,26 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
     };
     let recent: Vec<&Turn> = history.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
     let mut queries = vec![question.clone()];
+    let skill = if all.unwrap_or(false) { 0 } else { id };
     if expand.unwrap_or(true) {
-        let mut user = String::new();
+        // what the collection is about: the question is read in its domain
+        let mut user = state.with_db(|c| {
+            let list = if skill == 0 { db::skills(c)? } else { vec![db::skill(c, id)?] };
+            Ok::<_, String>(
+                list.iter()
+                    .map(|s| {
+                        let mut l = format!("Collection: {}", if s.title.is_empty() { &s.name } else { &s.title });
+                        if !s.description.is_empty() {
+                            l.push_str(&format!(" – {}", s.description.chars().take(400).collect::<String>()));
+                        }
+                        if !s.keywords.is_empty() {
+                            l.push_str(&format!(" (keywords: {})", s.keywords));
+                        }
+                        l + "\n"
+                    })
+                    .collect::<String>(),
+            )
+        })?;
         for t in &recent {
             user.push_str(&format!("Earlier question: {}\n", t.q));
         }
@@ -721,17 +748,19 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
             }
         }
     }
-    let skill = if all.unwrap_or(false) { 0 } else { id };
-    // search by meaning too when the skill has a vector index (the model is loaded once)
+    // search by meaning too when the vector index covers (nearly) every page: a half-built
+    // index would pull every answer into the documents that already have vectors
     let mut vec_hits: Vec<Vec<(i64, i64, usize, f32)>> = vec![];
-    let has_vectors = vector::model_present(&state.data_dir)
-        && state.with_db(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM vectors v JOIN documents d ON d.id = v.doc_id WHERE (?1 = 0 OR d.skill_id = ?1))", [skill], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string()))?;
+    let has_vectors = vector::model_present(&state.data_dir) && {
+        let (indexed, total) = state.with_db(|c| vector::coverage(c, skill))?;
+        total > 0 && indexed * 100 >= total * 95
+    };
     if has_vectors {
         let dir = state.data_dir.clone();
         let qs = queries.clone();
         if let Ok(Ok(qv)) = tauri::async_runtime::spawn_blocking(move || vector::embed_queries(&dir, &qs)).await {
             for v in &qv {
-                vec_hits.push(state.with_db(|c| vector::search(c, skill, v, 25))?);
+                vec_hits.push(state.with_db(|c| vector::search(c, skill, v, 15))?);
             }
         }
     }

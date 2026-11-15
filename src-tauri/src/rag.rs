@@ -108,7 +108,8 @@ pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], vec_hits: &[V
         }
     }
     for (qi, list) in vec_hits.iter().enumerate() {
-        let w = if qi == 0 { 1.2 } else { 1.0 };
+        // meaning alone weighs less than the words: a near miss by meaning is common
+        let w = if qi == 0 { 0.9 } else { 0.7 };
         let mut rank = 0;
         for &(d, no, chunk, _) in list {
             let key = (d, no);
@@ -132,13 +133,24 @@ pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], vec_hits: &[V
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     let mut out = vec![];
     let mut size = 0;
-    for (key, _) in ranked.into_iter().take(k) {
-        let Some(h) = hits.remove(&key) else { continue };
+    // pages found only by meaning fill at most half of the places
+    let mut vec_only = 0;
+    for (key, _) in ranked.into_iter() {
+        if out.len() >= k {
+            break;
+        }
         let via = match (by_fts.contains(&key), by_vec.get(&key)) {
             (true, Some(_)) => "both",
             (false, Some(_)) => "vec",
             _ => "fts",
         };
+        if via == "vec" {
+            if vec_only >= k.div_ceil(2) {
+                continue;
+            }
+            vec_only += 1;
+        }
+        let Some(h) = hits.remove(&key) else { continue };
         let text = match (via, by_vec.get(&key)) {
             // found only by meaning: the matching chunk (the words may not occur at all)
             ("vec", Some(&ch)) if h.text.chars().count() > 3000 => {

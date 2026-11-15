@@ -20,7 +20,16 @@ SkillStar - What's new
   their vectors automatically. On Intel Macs the same model runs in
   pure Rust (candle; ~490 MB download, slower indexing).
 - RAG searches every document of the skill, also the ones left out of
-  the package.
+  the package. A document can be left out of the RAG search one by one
+  (right-click → Searched by RAG questions).
+- The AI reads the question in the field of the skill (its title,
+  description and keywords), so jargon typed without accents is not
+  misread.
+- The vector search is used once the index covers the documents; a
+  half-built index no longer pulls the answers into the documents that
+  already have vectors.
+- The document list shows the selected rows clearly ("N selected", Esc
+  clears it); the ticks only mean "in the skill package".
 
 1.0.0
 -----

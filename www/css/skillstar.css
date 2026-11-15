@@ -601,3 +601,4 @@ a.cite.web:hover { background: var(--mix-web); color: #1c1203; }
 .pv-mk { position: absolute; border-radius: 2px; mix-blend-mode: multiply; }
 .pv-mk.span { background: rgba(255, 214, 0, .38); box-shadow: 0 0 0 1px rgba(230, 170, 0, .35); }
 .pv-mk.term { background: rgba(255, 120, 0, .35); box-shadow: 0 0 0 1.5px rgba(255, 90, 0, .8); }
+.ocr-mode.rag-off { color: var(--warn, #d97706); }

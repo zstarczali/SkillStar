@@ -195,7 +195,8 @@ export function renderDocs(ctx, el) {
     d.use_when ? h('div.dn-use', d.use_when) : d.summary ? h('div.dn-use', d.summary) : null),
   h('td.c-pages', d.status === 'done' ? String(d.pages) : ''),
   h('td.c-src', textSource(d), d.ocr_mode !== 'auto' ? h('span.ocr-mode', { title: t('OCR mód') }, d.ocr_mode === 'force' ? t('mindig OCR') : t('OCR nélkül')) : null,
-    d.ocr_lang ? h('span.ocr-mode', { title: t('OCR nyelv') }, ocrLangLabel(ctx, d.ocr_lang)) : null),
+    d.ocr_lang ? h('span.ocr-mode', { title: t('OCR nyelv') }, ocrLangLabel(ctx, d.ocr_lang)) : null,
+    d.rag === false ? h('span.ocr-mode.rag-off', { title: t('A RAG kérdések nem keresnek ebben a dokumentumban (jobb klikk → Keresés a RAG kérdésekben)') }, t('RAG ki')) : null),
   h('td.c-size', fmtSize(d.size)),
   h('td.c-st', statusCell(ctx, d)),
   h('td.c-act', h('button.icon-btn', { title: t('Műveletek'), on: { click: (e) => docMenu(ctx, e, d) } }, icon('chev')))));
@@ -218,6 +219,11 @@ function docMenu(ctx, e, d) {
     '-',
     { label: many ? t('Kijelölt sorok feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },
     { label: many ? t('Újra OCR más nyelvvel ({0})…', sel.length) : t('Újra OCR más nyelvvel…'), icon: 'scan', disabled: !(many ? sel : [d]).some((x) => x.kind === 'pdf' || x.kind === 'image') || S.queue.includes(d.id), action: () => reOcrDlg(ctx, (many ? sel : [d]).filter((x) => x.kind === 'pdf' || x.kind === 'image')) },
+    { label: t('Keresés a RAG kérdésekben'), icon: d.rag !== false ? 'check' : null, action: async () => {
+      const on = d.rag === false;
+      try { for (const x of many ? sel : [d]) await invoke('set_document_rag', { id: x.id, on }); } catch (e2) { err(e2); }
+      ctx.reloadDocs();
+    } },
     { header: t('OCR mód') },
     ...[['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')], ['off', t('OCR nélkül')]].map(([m, l]) => (
       { label: l, icon: d.ocr_mode === m ? 'check' : null, action: async () => { for (const x of many ? sel : [d]) await ctx.saveDoc(x, { ocr_mode: m }, true); ctx.reloadDocs(); } })),

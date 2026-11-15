@@ -43,7 +43,7 @@ pub const ONNX_FILES: Files = Files {
     dir: "multilingual-e5-small",
 };
 
-/// candle (pure Rust, Intel macOS): the full precision weights (~470 MB).
+/// candle (pure Rust, macOS and Linux): the full precision weights (~470 MB).
 #[allow(dead_code)]
 pub const CANDLE_FILES: Files = Files {
     repo: "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/",
@@ -283,6 +283,18 @@ pub fn chunks(text: &str) -> Vec<String> {
 }
 
 /// Pages of the skill (0 = every skill) whose vectors are missing or outdated.
+/// Pages of the skill (0 = every skill) with text, and how many of them have vectors.
+pub fn coverage(c: &Connection, skill_id: i64) -> Result<(i64, i64), String> {
+    c.query_row(
+        "SELECT COUNT(*), SUM(EXISTS(SELECT 1 FROM vectors v WHERE v.doc_id = p.doc_id AND v.no = p.no))
+         FROM pages p JOIN documents d ON d.id = p.doc_id
+         WHERE (?1 = 0 OR d.skill_id = ?1) AND d.status = 'done' AND d.rag = 1 AND trim(p.text) <> ''",
+        [skill_id],
+        |r| Ok((r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get::<_, i64>(0)?)),
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn stale_pages(c: &Connection, skill_id: i64) -> Result<(Vec<(i64, i64, String)>, i64), String> {
     let mut st = c
         .prepare(
@@ -342,7 +354,7 @@ pub fn search(c: &Connection, skill_id: i64, q: &[f32], k: usize) -> Result<Vec<
     let mut st = c
         .prepare(
             "SELECT v.doc_id, v.no, v.chunk, v.vec FROM vectors v JOIN documents d ON d.id = v.doc_id
-             WHERE (?1 = 0 OR d.skill_id = ?1)",
+             WHERE (?1 = 0 OR d.skill_id = ?1) AND d.rag = 1",
         )
         .map_err(|e| e.to_string())?;
     let mut rows = st.query([skill_id]).map_err(|e| e.to_string())?;

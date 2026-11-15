@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 [features]
 # the pure-Rust embedding backend (always on for Intel macOS); for tests elsewhere
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
-# build as on Intel macOS (candle instead of ONNX Runtime), to check that code path
+# build as on macOS / Linux (candle instead of ONNX Runtime), to check that code path
 candle-only = ["candle"]
 
 [dependencies]
@@ -42,18 +42,17 @@ candle-nn = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
 
-# local embedding model (vector search); ONNX Runtime has no prebuilt binaries for Intel macOS
-[target.'cfg(not(all(target_os = "macos", target_arch = "x86_64")))'.dependencies]
-fastembed = { version = "7.7", default-features = false, features = ["ort-download-binaries-native-tls"] }
-
-# Intel macOS: the same model through candle (pure Rust)
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+# macOS and Linux: the embedding model through candle (pure Rust). The prebuilt ONNX
+# Runtime needs glibc 2.38+ on Linux and macOS 13.4+ on Apple Silicon (and has no
+# Intel macOS build), so only Windows uses it.
+[target.'cfg(not(windows))'.dependencies]
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [target.'cfg(windows)'.dependencies]
+fastembed = { version = "7.7", default-features = false, features = ["ort-download-binaries-native-tls"] }
 windows = { version = "0.58", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_System_WinRT"] }
 
 [profile.release]
