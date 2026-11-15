@@ -1,0 +1,22 @@
+SkillStar - What's new
+======================
+
+0.1.0
+-----
+- First version: turns a pile of DOCX, PDF, PPTX, ODT, HTML, Markdown
+  and text files into a Claude skill package (Claude Code plugin folder,
+  .plugin file and a claude.ai skill ZIP).
+- PDFs through PDFium (text layer, bookmarks as table of contents);
+  pages without usable text are read with OCR: built-in Windows OCR or
+  Tesseract. OCR mode per document (auto / always / never).
+- Resumable processing: every finished page is saved at once, so a
+  stopped or interrupted OCR run continues where it left off.
+- Local SQLite database with full-text search (FTS5) over every page.
+- Text viewer with page navigation, outline and editable page text to
+  fix OCR errors.
+- Generated SKILL.md, document index with table of contents, keyword
+  index and per-document descriptions; package preview before building.
+- Optional AI (off by default): document titles / descriptions, skill
+  description, and questions answered from the documents.
+- Drag and drop files and folders, GitStar themes, Hungarian / English
+  UI, self-update.

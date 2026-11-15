@@ -1,0 +1,14 @@
+{
+  "name": "skillstar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SkillStar - turns DOCX, PDF and other documents into Claude skill packages, with local OCR and a local database (Tauri 2 + Rust)",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon assets/icon.svg -o src-tauri/icons"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

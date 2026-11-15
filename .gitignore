@@ -1,0 +1,8 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+__pycache__/
+*.pyc
+src-tauri/resources/pdfium/*.dll
+src-tauri/resources/pdfium/*.dylib
+src-tauri/resources/pdfium/*.so
