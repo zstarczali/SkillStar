@@ -150,11 +150,14 @@ export function renderDocs(ctx, el) {
     h('button.btn', { on: { click: () => ctx.addFolder() } }, icon('folder'), t('Mappa…')),
     h('span.sep'),
     running ? h('button.btn.danger', { on: { click: () => ctx.cancel() } }, icon('stop'), t('Leállítás'))
-      : h('button.btn.primary', { disabled: !toProcess.length && !selDocs.length, title: t('Az új, hibás és megváltozott dokumentumok feldolgozása (kijelölésnél: a kijelöltek)'),
+      : h('button.btn.primary', { disabled: !toProcess.length && !selDocs.length, title: t('Az új, hibás és megváltozott dokumentumok feldolgozása. Ha sorokat jelöltél ki (kattintás, Ctrl/Shift + kattintás), csak azokat dolgozza fel; a pipa nem kijelölés, hanem hogy bekerül-e a skillbe.'),
         on: { click: () => ctx.process(selDocs.length ? selDocs.map((d) => d.id) : toProcess.map((d) => d.id)) } },
-      icon('play'), selDocs.length ? t('Kijelöltek feldolgozása ({0})', selDocs.length) : toProcess.some((d) => d.partial > 0) ? t('Folytatás ({0})', toProcess.length) : t('Feldolgozás ({0})', toProcess.length)),
+      icon('play'), selDocs.length ? t('Kijelölt sorok feldolgozása ({0})', selDocs.length) : toProcess.some((d) => d.partial > 0) ? t('Folytatás ({0})', toProcess.length) : t('Feldolgozás ({0})', toProcess.length)),
+    selDocs.length ? h('span.sel-chip', { title: t('Sorok kijelölése: kattintás, Ctrl/Shift + kattintás. A pipa nem kijelölés: azt mutatja, hogy a dokumentum bekerül-e a skillbe.') },
+      t('{0} sor kijelölve', selDocs.length),
+      h('button.icon-btn', { title: t('Kijelölés megszüntetése (Esc)'), on: { click: () => { sel.clear(); ctx.renderContent(); } } }, icon('close'))) : null,
     h('span.grow'),
-    selDocs.length ? h('button.btn', { on: { click: () => ctx.removeDocs(selDocs) } }, icon('trash'), t('Eltávolítás ({0})', selDocs.length)) : null,
+    selDocs.length ? h('button.btn', { on: { click: () => ctx.removeDocs(selDocs) } }, icon('trash'), t('Kijelölt sorok eltávolítása ({0})', selDocs.length)) : null,
     h('span.docs-sum', t('{0} dokumentum · {1} oldal · {2} kész', docs.length, docs.reduce((a, d) => a + d.pages, 0), docs.filter((d) => d.status === 'done').length)));
 
   if (!docs.length) {
@@ -197,7 +200,7 @@ export function renderDocs(ctx, el) {
   h('td.c-st', statusCell(ctx, d)),
   h('td.c-act', h('button.icon-btn', { title: t('Műveletek'), on: { click: (e) => docMenu(ctx, e, d) } }, icon('chev')))));
   const table = h('table.doc-table',
-    h('thead', h('tr', h('th'), h('th', t('Dokumentum')), h('th.r', t('Oldal')), h('th', t('Szöveg')), h('th.r', t('Méret')), h('th', t('Állapot')), h('th'))),
+    h('thead', h('tr', h('th.c-inc', { title: t('A bepipált dokumentumok kerülnek a skill csomagjába. Sorok kijelölése (feldolgozáshoz, törléshez): kattintás a sorra, Ctrl/Shift + kattintás.') }, t('Skillbe')), h('th', t('Dokumentum')), h('th.r', t('Oldal')), h('th', t('Szöveg')), h('th.r', t('Méret')), h('th', t('Állapot')), h('th'))),
     h('tbody', rows));
   el.replaceChildren(h('div.docs', head, h('div.doc-scroll', table),
     h('div.docs-foot', t('Tipp: dupla katt = szöveg megtekintése · jobb klikk = műveletek · Ctrl/Shift = több kijelölése · fájlok ráhúzhatók az ablakra'))));
@@ -213,7 +216,7 @@ function docMenu(ctx, e, d) {
     { label: t('Leírás szerkesztése…'), icon: 'edit', action: () => ctx.editDoc(d) },
     ctx.aiOn() ? { label: t('Leírás AI-val'), icon: 'sparkle', disabled: d.status !== 'done', action: () => ctx.aiDescribe(d) } : null,
     '-',
-    { label: many ? t('Kijelöltek feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },
+    { label: many ? t('Kijelölt sorok feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },
     { label: many ? t('Újra OCR más nyelvvel ({0})…', sel.length) : t('Újra OCR más nyelvvel…'), icon: 'scan', disabled: !(many ? sel : [d]).some((x) => x.kind === 'pdf' || x.kind === 'image') || S.queue.includes(d.id), action: () => reOcrDlg(ctx, (many ? sel : [d]).filter((x) => x.kind === 'pdf' || x.kind === 'image')) },
     { header: t('OCR mód') },
     ...[['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')], ['off', t('OCR nélkül')]].map(([m, l]) => (

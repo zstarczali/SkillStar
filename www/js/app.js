@@ -1267,7 +1267,11 @@ async function boot() {
     else if (mod && key === 'a' && S.view === 'docs' && !e.target.closest?.('input,textarea')) { e.preventDefault(); S.docs.forEach((d) => S.docSel.add(d.id)); renderContent(); }
     else if (e.key === 'Delete' && S.view === 'docs' && S.docSel.size && !e.target.closest?.('input,textarea')) { e.preventDefault(); removeDocs(S.docs.filter((d) => S.docSel.has(d.id))); }
     else if (mod && key === ',') { e.preventDefault(); settingsDlg(); }
-    else if (e.key === 'Escape') document.querySelector('.ai-panel')?.remove();
+    else if (e.key === 'Escape') {
+      const panel = document.querySelector('.ai-panel');
+      if (panel) panel.remove();
+      else if (S.view === 'docs' && S.docSel.size && !e.target.closest?.('input,textarea')) { S.docSel.clear(); renderContent(); }
+    }
   });
   let wheelSum = 0, wheelLast = 0, wheelAt = 0;
   addEventListener('wheel', (e) => {
