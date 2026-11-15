@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::settings::{tr, Settings, SettingsStore};
-use crate::{ai, ocr, pdf, process, rag, skill};
+use crate::{ai, ocr, pdf, process, rag, skill, vector};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -627,12 +627,15 @@ pub struct AskResult {
     pub sources: Vec<rag::Passage>,
     /// the search queries used (the question first)
     pub queries: Vec<String>,
+    /// web pages found by the web search ([Wn] = web[n-1])
+    pub web: Vec<ai::WebSource>,
 }
 
 /// AI in RAG mode: (AI-written extra search queries) → local full-text retrieval
 /// → numbered passages → answer with [n] citations. `all`: every skill.
 #[tauri::command]
-pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>, chat: Option<i64>) -> Result<AskResult, String> {
+pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>, chat: Option<i64>, web: Option<bool>) -> Result<AskResult, String> {
+    let use_web = web.unwrap_or(false);
     let cfg = state.settings.get();
     ai_check(&cfg)?;
     let question = question.trim().to_string();
@@ -672,15 +675,28 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
         }
     }
     let skill = if all.unwrap_or(false) { 0 } else { id };
+    // search by meaning too when the skill has a vector index (the model is loaded once)
+    let mut vec_hits: Vec<Vec<(i64, i64, usize, f32)>> = vec![];
+    let has_vectors = vector::model_present(&state.data_dir)
+        && state.with_db(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM vectors v JOIN documents d ON d.id = v.doc_id WHERE (?1 = 0 OR d.skill_id = ?1))", [skill], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string()))?;
+    if has_vectors {
+        let dir = state.data_dir.clone();
+        let qs = queries.clone();
+        if let Ok(Ok(qv)) = tauri::async_runtime::spawn_blocking(move || vector::embed_queries(&dir, &qs)).await {
+            for v in &qv {
+                vec_hits.push(state.with_db(|c| vector::search(c, skill, v, 25))?);
+            }
+        }
+    }
     let qs = queries.clone();
-    let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, 14, 60_000))?;
-    if sources.is_empty() {
+    let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, &vec_hits, 14, 60_000))?;
+    if sources.is_empty() && !use_web {
         let text = tr(
-            "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, vagy kapcsold be a „Keresés bővítése AI-val” lehetőséget.",
-            "The search found no page that fits the question. Try other words, or turn on “Expand the search with AI”.",
+            "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, kapcsold be a „Keresés bővítése AI-val” lehetőséget, vagy keress a weben is.",
+            "The search found no page that fits the question. Try other words, turn on “Expand the search with AI”, or search the web too.",
         );
-        let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
-        return Ok(AskResult { chat_id, text, sources, queries });
+        let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &[])?;
+        return Ok(AskResult { chat_id, text, sources, queries, web: vec![] });
     }
     let mut user = rag::context(&sources);
     if !recent.is_empty() {
@@ -692,14 +708,32 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
         user.push_str("</conversation>\n");
     }
     user.push_str(&format!("\nQuestion: {question}"));
-    let text = ai_run(&cfg, ai::ask_system(&cfg.ai_language), user, 8000).await?;
-    let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
-    Ok(AskResult { chat_id, text, sources, queries })
+    let (text, pages) = if use_web {
+        ai::complete_web(
+            ai::AiRequest {
+                provider: &cfg.ai_provider,
+                api_key: cfg.ai_key(),
+                model: cfg.ai_model_id(),
+                system: ai::ask_system(&cfg.ai_language, true),
+                user,
+                effort: "medium",
+                max_tokens: 12000,
+            },
+            4,
+        )
+        .await?
+    } else {
+        (ai_run(&cfg, ai::ask_system(&cfg.ai_language, false), user, 8000).await?, vec![])
+    };
+    let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &pages)?;
+    Ok(AskResult { chat_id, text, sources, queries, web: pages })
 }
 
 /// Saves a question + answer into the conversation (a new one, named after the first question).
-fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &str, sources: &[rag::Passage], queries: &[String]) -> Result<i64, String> {
+#[allow(clippy::too_many_arguments)]
+fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &str, sources: &[rag::Passage], queries: &[String], web: &[ai::WebSource]) -> Result<i64, String> {
     let src = serde_json::to_string(sources).unwrap_or_else(|_| "[]".into());
+    let wb = serde_json::to_string(web).unwrap_or_else(|_| "[]".into());
     let qs = serde_json::to_string(queries).unwrap_or_else(|_| "[]".into());
     state.with_db(|c| {
         let id = match chat {
@@ -712,9 +746,26 @@ fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &st
                 db::create_chat(c, skill_id, &title)?
             }
         };
-        db::add_chat_turn(c, id, q, a, &src, &qs)?;
+        db::add_chat_turn(c, id, q, a, &src, &qs, &wb)?;
         Ok(id)
     })
+}
+
+#[tauri::command]
+pub fn vector_status(state: State<'_, AppState>, skill_id: i64) -> Result<vector::Status, String> {
+    state.with_db(|c| vector::status(c, &state.data_dir, skill_id))
+}
+
+/// Builds the vector index of a skill in the background (first use downloads the model); progress: "vec-progress".
+#[tauri::command]
+pub fn vector_build(app: tauri::AppHandle, state: State<'_, AppState>, skill_id: i64) -> Result<(), String> {
+    vector::start(app, state.db_path.clone(), state.data_dir.clone(), skill_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn vector_stop() {
+    vector::stop();
 }
 
 #[tauri::command]

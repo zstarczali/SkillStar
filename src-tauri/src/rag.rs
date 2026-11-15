@@ -19,6 +19,8 @@ pub struct Passage {
     pub doc: String,
     pub page: i64,
     pub text: String,
+    /// how it was found: "fts" (words), "vec" (meaning) or "both"
+    pub via: String,
 }
 
 /// Search terms of a query: no stop words, long words cut to a stem so that
@@ -68,10 +70,14 @@ fn best_window(text: &str, terms: &[String], max: usize) -> String {
 }
 
 /// Retrieves at most `k` passages for the queries (the first is the question itself).
-/// `skill_id` 0 searches every skill.
-pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], k: usize, budget: usize) -> Result<Vec<Passage>, String> {
+/// `skill_id` 0 searches every skill. `vec_hits`: the vector search results of the
+/// queries, (doc_id, page, chunk, score) in rank order, fused like the word searches.
+pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], vec_hits: &[Vec<(i64, i64, usize, f32)>], k: usize, budget: usize) -> Result<Vec<Passage>, String> {
     let mut score: HashMap<(i64, i64), f64> = HashMap::new();
     let mut hits: HashMap<(i64, i64), db::Hit> = HashMap::new();
+    let mut by_fts: std::collections::HashSet<(i64, i64)> = Default::default();
+    // the best matching chunk of a page found by meaning
+    let mut by_vec: HashMap<(i64, i64), usize> = HashMap::new();
     let mut all_terms: Vec<String> = vec![];
     for (qi, q) in queries.iter().enumerate() {
         let ts = terms(q);
@@ -97,7 +103,29 @@ pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], k: usize, bud
         for (rank, h) in list.into_iter().enumerate() {
             let key = (h.doc_id, h.page);
             *score.entry(key).or_default() += w / (60.0 + rank as f64);
+            by_fts.insert(key);
             hits.entry(key).or_insert(h);
+        }
+    }
+    for (qi, list) in vec_hits.iter().enumerate() {
+        let w = if qi == 0 { 1.2 } else { 1.0 };
+        let mut rank = 0;
+        for &(d, no, chunk, _) in list {
+            let key = (d, no);
+            // several chunks of a page: the page counts once, at its best rank
+            if by_vec.contains_key(&key) && vec_hits.len() == 1 {
+                continue;
+            }
+            by_vec.entry(key).or_insert(chunk);
+            *score.entry(key).or_default() += w / (60.0 + rank as f64);
+            rank += 1;
+            if !hits.contains_key(&key) {
+                if let Some(h) = db::page_hit(c, d, no)? {
+                    if skill_id == 0 || h.skill_id == skill_id {
+                        hits.insert(key, h);
+                    }
+                }
+            }
         }
     }
     let mut ranked: Vec<((i64, i64), f64)> = score.into_iter().collect();
@@ -106,12 +134,32 @@ pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], k: usize, bud
     let mut size = 0;
     for (key, _) in ranked.into_iter().take(k) {
         let Some(h) = hits.remove(&key) else { continue };
-        let text = best_window(&h.text, &all_terms, 3000);
+        let via = match (by_fts.contains(&key), by_vec.get(&key)) {
+            (true, Some(_)) => "both",
+            (false, Some(_)) => "vec",
+            _ => "fts",
+        };
+        let text = match (via, by_vec.get(&key)) {
+            // found only by meaning: the matching chunk (the words may not occur at all)
+            ("vec", Some(&ch)) if h.text.chars().count() > 3000 => {
+                let cs = crate::vector::chunks(&h.text);
+                let i = ch.min(cs.len().saturating_sub(1));
+                let mut t = cs.get(i).cloned().unwrap_or_default();
+                if let Some(next) = cs.get(i + 1) {
+                    if t.chars().count() + next.chars().count() < 3000 {
+                        t.push('\n');
+                        t.push_str(next);
+                    }
+                }
+                t
+            }
+            _ => best_window(&h.text, &all_terms, 3000),
+        };
         if size + text.len() > budget && !out.is_empty() {
             break;
         }
         size += text.len();
-        out.push(Passage { n: out.len() + 1, doc_id: h.doc_id, skill_id: h.skill_id, kind: h.kind, doc: h.doc, page: h.page, text });
+        out.push(Passage { n: out.len() + 1, doc_id: h.doc_id, skill_id: h.skill_id, kind: h.kind, doc: h.doc, page: h.page, text, via: via.into() });
     }
     Ok(out)
 }
@@ -163,14 +211,19 @@ mod tests {
             ..Default::default()
         };
         db::store_result(&mut c, d, &x, "h", 1, 1).unwrap();
-        let p = retrieve(&c, s, &["raszter megszakítások".into()], 8, 50_000).unwrap();
+        let p = retrieve(&c, s, &["raszter megszakítások".into()], &[], 8, 50_000).unwrap();
         assert_eq!(p[0].page, 2);
         assert_eq!(p[0].n, 1);
         assert!(p[0].text.contains("$D012"));
         assert!(p[0].text.chars().count() < 3200);
         // OR fallback + a second query
-        let p = retrieve(&c, 0, &["megszakítás vektor raszterfoo".into(), "IRQ vektor".into()], 8, 50_000).unwrap();
+        let p = retrieve(&c, 0, &["megszakítás vektor raszterfoo".into(), "IRQ vektor".into()], &[], 8, 50_000).unwrap();
         assert!(p.iter().any(|x| x.page == 3));
+        // a page found only by meaning comes in too, marked as such
+        let p = retrieve(&c, s, &["sprite".into()], &[vec![(d, 3, 0, 0.9), (d, 1, 0, 0.5)]], 8, 50_000).unwrap();
+        assert_eq!(p[0].page, 1);
+        assert_eq!(p[0].via, "both");
+        assert!(p.iter().any(|x| x.page == 3 && x.via == "vec"));
         assert!(context(&p).contains("<passage n=\"1\""));
         let _ = std::fs::remove_dir_all(&dir);
     }

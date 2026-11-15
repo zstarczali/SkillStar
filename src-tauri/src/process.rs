@@ -108,6 +108,7 @@ impl Worker {
 
     fn run(&self, app: &tauri::AppHandle, db_path: &Path) {
         let Ok(mut c) = db::open(db_path) else { return };
+        let mut touched: Vec<i64> = vec![];
         loop {
             let next = self.queue.lock().unwrap().pop_front();
             let Some(id) = next else { break };
@@ -121,7 +122,12 @@ impl Worker {
             emit("processing", "start", 0, 0, "");
             let result = self.process_one(app, &mut c, &doc, &mut |stage, done, total| emit("processing", stage, done, total, ""));
             match result {
-                Ok(()) => emit("done", "save", 1, 1, ""),
+                Ok(()) => {
+                    emit("done", "save", 1, 1, "");
+                    if !touched.contains(&doc.skill_id) {
+                        touched.push(doc.skill_id);
+                    }
+                }
                 Err(e) if e == CANCELLED => {
                     let _ = db::set_status(&c, id, "new", "");
                     emit("new", "", 0, 0, "");
@@ -139,6 +145,13 @@ impl Worker {
             }
         }
         self.cancel.store(false, Ordering::SeqCst);
+        // once the vector model is there, new text gets its vectors right away
+        let data_dir = app.state::<crate::commands::AppState>().data_dir.clone();
+        if crate::vector::model_present(&data_dir) {
+            for sk in touched {
+                crate::vector::start(app.clone(), db_path.to_path_buf(), data_dir.clone(), sk);
+            }
+        }
     }
 
     fn process_one(&self, app: &tauri::AppHandle, c: &mut rusqlite::Connection, doc: &db::Document, progress: extract::Progress) -> Result<(), String> {

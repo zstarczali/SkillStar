@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS outline (
   PRIMARY KEY (doc_id, ord)
 );
 -- pages finished by a run that was interrupted (cancel, error, app closed): resumed next time
+-- semantic index: one embedding per page chunk (vector.rs); hash = page text hash
+CREATE TABLE IF NOT EXISTS vectors (
+  doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  no INTEGER NOT NULL,
+  chunk INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  vec BLOB NOT NULL,
+  PRIMARY KEY (doc_id, no, chunk)
+);
 -- RAG conversations of the AI panel
 CREATE TABLE IF NOT EXISTS chats (
   id INTEGER PRIMARY KEY,
@@ -78,6 +87,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
   a TEXT NOT NULL,
   sources TEXT NOT NULL DEFAULT '[]',
   queries TEXT NOT NULL DEFAULT '[]',
+  web TEXT NOT NULL DEFAULT '[]',
   created INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_turns_chat ON chat_turns(chat_id, id);
@@ -122,6 +132,10 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     }
     if !has("documents", "ocr_lang")? {
         c.execute_batch("ALTER TABLE documents ADD COLUMN ocr_lang TEXT NOT NULL DEFAULT ''")?;
+    }
+    // chat_turns existed for a while without the web search results
+    if !has("chat_turns", "web")? {
+        c.execute_batch("ALTER TABLE chat_turns ADD COLUMN web TEXT NOT NULL DEFAULT '[]'")?;
     }
     Ok(())
 }
@@ -378,6 +392,7 @@ pub fn add_document(c: &Connection, skill_id: i64, path: &Path) -> Result<Option
 
 pub fn delete_document(c: &Connection, id: i64) -> Result<(), String> {
     c.execute("DELETE FROM partial_pages WHERE doc_id=?1", [id]).map_err(e)?;
+    c.execute("DELETE FROM vectors WHERE doc_id=?1", [id]).map_err(e)?;
     c.execute("DELETE FROM pages_fts WHERE doc_id=?1", [id]).map_err(e)?;
     c.execute("DELETE FROM pages WHERE doc_id=?1", [id]).map_err(e)?;
     c.execute("DELETE FROM outline WHERE doc_id=?1", [id]).map_err(e)?;
@@ -411,6 +426,7 @@ pub fn reorder(c: &Connection, ids: &[i64]) -> Result<(), String> {
 pub fn store_result(c: &mut Connection, id: i64, x: &crate::extract::Extracted, sha: &str, size: i64, mtime: i64) -> Result<(), String> {
     let tx = c.transaction().map_err(e)?;
     tx.execute("DELETE FROM partial_pages WHERE doc_id=?1", [id]).map_err(e)?;
+    tx.execute("DELETE FROM vectors WHERE doc_id=?1", [id]).map_err(e)?;
     tx.execute("DELETE FROM pages_fts WHERE doc_id=?1", [id]).map_err(e)?;
     tx.execute("DELETE FROM pages WHERE doc_id=?1", [id]).map_err(e)?;
     tx.execute("DELETE FROM outline WHERE doc_id=?1", [id]).map_err(e)?;
@@ -496,6 +512,8 @@ pub struct ChatTurn {
     /// rag::Passage list as JSON
     pub sources: serde_json::Value,
     pub queries: serde_json::Value,
+    /// ai::WebSource list as JSON
+    pub web: serde_json::Value,
     pub created: i64,
 }
 
@@ -511,7 +529,7 @@ pub fn chats(c: &Connection, skill_id: i64) -> Result<Vec<Chat>, String> {
 }
 
 pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String> {
-    let mut st = c.prepare("SELECT id, q, a, sources, queries, created FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
+    let mut st = c.prepare("SELECT id, q, a, sources, queries, created, web FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
     let rows = st
         .query_map([chat_id], |r| {
             let src: String = r.get(3)?;
@@ -523,6 +541,7 @@ pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String>
                 sources: serde_json::from_str(&src).unwrap_or(serde_json::Value::Array(vec![])),
                 queries: serde_json::from_str(&qs).unwrap_or(serde_json::Value::Array(vec![])),
                 created: r.get(5)?,
+                web: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or(serde_json::Value::Array(vec![])),
             })
         })
         .map_err(e)?;
@@ -535,11 +554,11 @@ pub fn create_chat(c: &Connection, skill_id: i64, title: &str) -> Result<i64, St
     Ok(c.last_insert_rowid())
 }
 
-pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str) -> Result<(), String> {
+pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str, web: &str) -> Result<(), String> {
     let t = now();
     c.execute(
-        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![chat_id, q, a, sources, queries, t],
+        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created, web) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![chat_id, q, a, sources, queries, t, web],
     )
     .map_err(e)?;
     c.execute("UPDATE chats SET updated=?2 WHERE id=?1", params![chat_id, t]).map_err(e)?;
@@ -615,19 +634,35 @@ pub fn fts_query(q: &str, any: bool) -> String {
 }
 
 pub fn search(c: &Connection, skill_id: i64, q: &str, limit: i64) -> Result<Vec<Hit>, String> {
-    let mut hits = run_search(c, skill_id, &fts_query(q, false), limit)?;
+    let mut hits = run_search(c, skill_id, &fts_query(q, false), limit, true)?;
     if hits.is_empty() {
-        hits = run_search(c, skill_id, &fts_query(q, true), limit)?;
+        hits = run_search(c, skill_id, &fts_query(q, true), limit, true)?;
     }
     Ok(hits)
 }
 
 /// A ready FTS5 match expression (the RAG retrieval builds its own); skill 0 = every skill.
-pub fn search_expr(c: &Connection, skill_id: i64, expr: &str, limit: i64) -> Result<Vec<Hit>, String> {
-    run_search(c, skill_id, expr, limit)
+/// One page as a search hit (for pages found only by the vector search).
+pub fn page_hit(c: &Connection, doc_id: i64, no: i64) -> Result<Option<Hit>, String> {
+    let r = c.query_row(
+        "SELECT p.doc_id, CASE WHEN d.title <> '' THEN d.title ELSE d.name END, p.no, p.text, d.skill_id, d.kind
+         FROM pages p JOIN documents d ON d.id = p.doc_id WHERE p.doc_id = ?1 AND p.no = ?2",
+        params![doc_id, no],
+        |r| Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: String::new(), text: r.get(3)?, skill_id: r.get(4)?, kind: r.get(5)? }),
+    );
+    match r {
+        Ok(h) => Ok(Some(h)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(x) => Err(e(x)),
+    }
 }
 
-fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<Hit>, String> {
+/// The RAG search: every document of the skill, also the ones left out of the package.
+pub fn search_expr(c: &Connection, skill_id: i64, expr: &str, limit: i64) -> Result<Vec<Hit>, String> {
+    run_search(c, skill_id, expr, limit, false)
+}
+
+fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64, included_only: bool) -> Result<Vec<Hit>, String> {
     if m.is_empty() {
         return Ok(vec![]);
     }
@@ -636,12 +671,12 @@ fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<
             "SELECT f.doc_id, CASE WHEN d.title <> '' THEN d.title ELSE d.name END, f.no,
                     snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text, d.skill_id, d.kind
              FROM pages_fts f JOIN documents d ON d.id = f.doc_id
-             WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND d.include = 1
+             WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND (?4 = 0 OR d.include = 1)
              ORDER BY bm25(pages_fts) LIMIT ?3",
         )
         .map_err(e)?;
     let rows = st
-        .query_map(params![m, skill_id, limit], |r| {
+        .query_map(params![m, skill_id, limit, included_only], |r| {
             Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)?, skill_id: r.get(5)?, kind: r.get(6)? })
         })
         .map_err(e)?;
@@ -691,8 +726,8 @@ mod tests {
         assert_eq!(document(&c, d).unwrap().partial, 0);
         // conversations: newest first, turns in order, removed with the chat
         let ch = create_chat(&c, s, "Első kérdés").unwrap();
-        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#).unwrap();
-        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]").unwrap();
+        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#, "[]").unwrap();
+        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]", r#"[{"n":1,"url":"u"}]"#).unwrap();
         let list = chats(&c, s).unwrap();
         assert_eq!((list.len(), list[0].turns), (1, 2));
         let turns = chat_turns(&c, ch).unwrap();
