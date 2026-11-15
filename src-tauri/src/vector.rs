@@ -278,17 +278,23 @@ pub fn page_hash(text: &str) -> String {
 }
 
 /// The chunks of a page as they are embedded (also used to show the matched chunk).
-pub fn chunks(text: &str) -> Vec<String> {
-    chunk_page(text, CHUNK).into_iter().filter(|c| c.trim().chars().count() >= 20).collect()
+/// A page has a chunk to embed (the rest is too short to search by meaning).
+fn indexable(text: &str) -> bool {
+    text.trim().chars().count() >= MIN_CHUNK && !chunks(text).is_empty()
 }
 
-/// Pages of the skill (0 = every skill) whose vectors are missing or outdated.
-/// Pages of the skill (0 = every skill) with text, and how many of them have vectors.
+const MIN_CHUNK: usize = 20;
+
+pub fn chunks(text: &str) -> Vec<String> {
+    chunk_page(text, CHUNK).into_iter().filter(|c| c.trim().chars().count() >= MIN_CHUNK).collect()
+}
+
+/// Pages of the skill (0 = every skill) with enough text, and how many of them have vectors.
 pub fn coverage(c: &Connection, skill_id: i64) -> Result<(i64, i64), String> {
     c.query_row(
         "SELECT COUNT(*), SUM(EXISTS(SELECT 1 FROM vectors v WHERE v.doc_id = p.doc_id AND v.no = p.no))
          FROM pages p JOIN documents d ON d.id = p.doc_id
-         WHERE (?1 = 0 OR d.skill_id = ?1) AND d.status = 'done' AND d.rag = 1 AND trim(p.text) <> ''",
+         WHERE (?1 = 0 OR d.skill_id = ?1) AND d.status = 'done' AND d.rag = 1 AND length(trim(p.text)) >= 20",
         [skill_id],
         |r| Ok((r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get::<_, i64>(0)?)),
     )
@@ -311,7 +317,8 @@ fn stale_pages(c: &Connection, skill_id: i64) -> Result<(Vec<(i64, i64, String)>
     let mut total = 0;
     for r in rows {
         let (d, no, text, hash) = r.map_err(|e| e.to_string())?;
-        if text.trim().is_empty() {
+        // a page with too little text (a page number, OCR noise) gets no vectors: not counted
+        if !indexable(&text) {
             continue;
         }
         total += 1;

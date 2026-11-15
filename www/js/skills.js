@@ -98,8 +98,12 @@ export const VIEWS = [
 export function renderViewTabs(ctx) {
   const { S } = ctx;
   const el = document.getElementById('tabs');
-  if (!S.skillId) { el.replaceChildren(); el.classList.add('none'); return; }
   el.classList.remove('none');
+  // no skill yet: the Documents tab, where the first files start a new skill
+  if (!S.skillId) {
+    el.replaceChildren(h('div.tab.active', icon('pages'), h('span.name', t('Dokumentumok'))));
+    return;
+  }
   el.replaceChildren(...VIEWS.map(([id, label, ic]) => h('div.tab' + (S.view === id ? '.active' : ''), { on: { click: () => ctx.setView(id) } },
     icon(ic), h('span.name', t(label)),
     id === 'docs' && S.docs.length ? h('span.tab-count', String(S.docs.length)) : null)));
@@ -153,9 +157,6 @@ export function renderDocs(ctx, el) {
       : h('button.btn.primary', { disabled: !toProcess.length && !selDocs.length, title: t('Az új, hibás és megváltozott dokumentumok feldolgozása. Ha sorokat jelöltél ki (kattintás, Ctrl/Shift + kattintás), csak azokat dolgozza fel; a pipa nem kijelölés, hanem hogy bekerül-e a skillbe.'),
         on: { click: () => ctx.process(selDocs.length ? selDocs.map((d) => d.id) : toProcess.map((d) => d.id)) } },
       icon('play'), selDocs.length ? t('Kijelölt sorok feldolgozása ({0})', selDocs.length) : toProcess.some((d) => d.partial > 0) ? t('Folytatás ({0})', toProcess.length) : t('Feldolgozás ({0})', toProcess.length)),
-    selDocs.length ? h('span.sel-chip', { title: t('Sorok kijelölése: kattintás, Ctrl/Shift + kattintás. A pipa nem kijelölés: azt mutatja, hogy a dokumentum bekerül-e a skillbe.') },
-      t('{0} sor kijelölve', selDocs.length),
-      h('button.icon-btn', { title: t('Kijelölés megszüntetése (Esc)'), on: { click: () => { sel.clear(); ctx.renderContent(); } } }, icon('close'))) : null,
     h('span.grow'),
     selDocs.length ? h('button.btn', { on: { click: () => ctx.removeDocs(selDocs) } }, icon('trash'), t('Kijelölt sorok eltávolítása ({0})', selDocs.length)) : null,
     h('span.docs-sum', t('{0} dokumentum · {1} oldal · {2} kész', docs.length, docs.reduce((a, d) => a + d.pages, 0), docs.filter((d) => d.status === 'done').length)));

@@ -437,7 +437,14 @@ function renderStatusbar() {
 
 function renderContent() {
   const el = document.getElementById('content');
-  if (!S.skillId) { renderWelcome(el); return; }
+  if (!S.skillId) {
+    // the Documents view (dropped or chosen files start a new skill), with the welcome page under it
+    renderDocs(ctx, el);
+    const w = h('div');
+    renderWelcome(w);
+    el.querySelector('.docs')?.append(...w.childNodes);
+    return;
+  }
   const view = { docs: renderDocs, text: renderText, skill: renderSkillForm, build: renderBuild, search: renderSearch }[S.view] || renderDocs;
   view(ctx, el);
 }

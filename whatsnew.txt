@@ -17,8 +17,8 @@ SkillStar - What's new
   (multilingual-e5-small, ~135 MB, downloaded once, offline and free)
   finds the passages that fit the question even when the words differ.
   Its results are fused with the full-text search; new documents get
-  their vectors automatically. On Intel Macs the same model runs in
-  pure Rust (candle; ~490 MB download, slower indexing).
+  their vectors automatically. On macOS and Linux the same model
+  runs in pure Rust (candle; ~490 MB download, slower indexing).
 - RAG searches every document of the skill, also the ones left out of
   the package. A document can be left out of the RAG search one by one
   (right-click → Searched by RAG questions).
