@@ -1,6 +1,6 @@
 [package]
 name = "skillstar"
-version = "0.1.0"
+version = "1.0.0"
 description = "SkillStar - turns DOCX, PDF and other documents into Claude skill packages (local OCR, local database)"
 edition = "2021"
 

@@ -1,12 +1,12 @@
 SkillStar Installation Guide
 ===========================
 
-Version 0.1.0
+Version 1.0.0
 -------------
-First version. Give SkillStar DOCX, PDF, PPTX, ODT, HTML, Markdown or
-text files (scanned PDFs too: they are read with OCR), and it builds a
-Claude skill package from them. See whatsnew.txt for the release
-history.
+Skill packages for Claude, Agent Skills (Codex, Gemini CLI, Copilot,
+Cursor), ChatGPT, Gemini, DeepSeek and RAG; questions answered from the
+documents with clickable [n] citations; OCR language per document and
+re-OCR. See whatsnew.txt for the release history.
 
 The main-window Donate button appears after 10 minutes of foreground
 use. The timer pauses while the window is unfocused or hidden and
