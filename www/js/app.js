@@ -738,17 +738,18 @@ function vecChip(skillId) {
     if (!box.isConnected && un) { un(); un = null; return; }
     let st;
     try { st = await invoke('vector_status', { skillId }); } catch { box.replaceChildren(); return; }
+    if (st.supported === false) { box.replaceChildren(); return; }
     const stop = h('button.icon-btn.sm', { title: t('Leállítás'), on: { click: () => invoke('vector_stop').catch(err) } }, icon('stop'));
     const build = (label, title) => h('button.btn.xs', { title, on: { click: () => { invoke('vector_build', { skillId }).then(() => { live = { stage: 'index', done: st.indexed, total: st.pages }; paint(st); }).catch(err); } } }, icon('sparkle'), label);
     const paint = (st) => {
       if (live && live.stage === 'download') {
         const pct = live.total ? Math.round((live.done / live.total) * 100) : 0;
-        box.replaceChildren(h('span.vec-st.run', { title: t('A helyi vektoros modell letöltése (egyszer, ~135 MB)') }, icon('refresh', 'spin'), t('Modell letöltése… {0}%', pct)), stop);
+        box.replaceChildren(h('span.vec-st.run', { title: t('A helyi vektoros modell letöltése (egyszer, ~{0} MB)', st.download_mb || 135) }, icon('refresh', 'spin'), t('Modell letöltése… {0}%', pct)), stop);
       } else if (live && live.stage === 'index') {
         const pct = live.total ? Math.round((live.done / live.total) * 100) : 0;
         box.replaceChildren(h('span.vec-st.run', { title: t('Vektoros index építése: {0}/{1} oldal', live.done, live.total) }, icon('refresh', 'spin'), t('Vektorindex… {0}%', pct)), stop);
       } else if (!st.ready) {
-        box.replaceChildren(build(t('Vektoros keresés'), t('Jelentés szerinti (szemantikus) keresés: a SkillStar egy helyi, többnyelvű modellel (multilingual-e5-small, ~135 MB, egyszer töltődik le) a szavak egyezése nélkül is megtalálja a kérdéshez illő részleteket. Offline és ingyenes.')));
+        box.replaceChildren(build(t('Vektoros keresés'), t('Jelentés szerinti (szemantikus) keresés: a SkillStar egy helyi, többnyelvű modellel (multilingual-e5-small, ~{0} MB, egyszer töltődik le) a szavak egyezése nélkül is megtalálja a kérdéshez illő részleteket. Offline és ingyenes.', st.download_mb || 135)));
       } else if (st.pages && st.indexed >= st.pages) {
         box.replaceChildren(h('span.vec-st.ok', { title: t('A kérdéseket jelentés szerint is keresi ({0} oldal, {1} részlet)', st.pages, st.chunks) }, icon('check'), t('Vektoros')));
       } else if (st.indexed > 0) {

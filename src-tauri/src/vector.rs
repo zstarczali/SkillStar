@@ -7,7 +7,6 @@
 
 use crate::db;
 use crate::skill::chunk_page;
-use fastembed::TextEmbedding;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -24,41 +23,74 @@ pub const CHUNK: usize = 1200;
 const DIM: usize = 384;
 const BATCH: usize = 32;
 
-static ENGINE: Mutex<Option<TextEmbedding>> = Mutex::new(None);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
 /// skills waiting for (re)indexing while a run is going
 static PENDING: Mutex<Vec<i64>> = Mutex::new(Vec::new());
 
-/// Hugging Face files of the model: the int8 quantized ONNX export (~118 MB) and the tokenizer.
-const REPO: &str = "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/onnx/";
-const ONNX: &str = "model_qint8_avx512_vnni.onnx";
-const FILES: [&str; 5] = [ONNX, "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"];
+/// Files of one backend: Hugging Face folder URL, file names (the first is the big one), local folder.
+pub struct Files {
+    pub repo: &'static str,
+    pub files: &'static [&'static str],
+    pub dir: &'static str,
+}
+
+/// ONNX Runtime: the int8 quantized export (~118 MB) and the tokenizer.
+#[allow(dead_code)]
+pub const ONNX_FILES: Files = Files {
+    repo: "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/onnx/",
+    files: &["model_qint8_avx512_vnni.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+    dir: "multilingual-e5-small",
+};
+
+/// candle (pure Rust, Intel macOS): the full precision weights (~470 MB).
+#[allow(dead_code)]
+pub const CANDLE_FILES: Files = Files {
+    repo: "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/",
+    files: &["model.safetensors", "tokenizer.json", "config.json"],
+    dir: "multilingual-e5-small-f32",
+};
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+const FILES: &Files = &ONNX_FILES;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const FILES: &Files = &CANDLE_FILES;
+
+/// Download size of the model in MB (for the UI).
+pub const DOWNLOAD_MB: u32 = if cfg!(all(target_os = "macos", target_arch = "x86_64")) { 490 } else { 135 };
+
+fn files_dir(data_dir: &Path, f: &Files) -> PathBuf {
+    data_dir.join("models").join(f.dir)
+}
 
 pub fn model_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("models").join(MODEL)
+    files_dir(data_dir, FILES)
 }
 
 /// Every model file is on disk.
 pub fn model_present(data_dir: &Path) -> bool {
     let d = model_dir(data_dir);
-    FILES.iter().all(|f| d.join(f).is_file())
+    FILES.files.iter().all(|f| d.join(f).is_file())
 }
 
-/// Downloads the missing model files; `progress(done_bytes, total_bytes)`.
 fn download(data_dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<(), String> {
+    download_files(data_dir, FILES, progress)
+}
+
+/// Downloads the missing files; `progress(done_bytes, total_bytes)` for the big one.
+fn download_files(data_dir: &Path, set: &Files, progress: &dyn Fn(u64, u64)) -> Result<(), String> {
     use crate::settings::tr;
-    let dir = model_dir(data_dir);
+    let dir = files_dir(data_dir, set);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     tauri::async_runtime::block_on(async {
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3600)).build().map_err(|e| e.to_string())?;
-        for f in FILES {
+        for (i, f) in set.files.iter().enumerate() {
             let target = dir.join(f);
             if target.is_file() {
                 continue;
             }
             let mut resp = client
-                .get(format!("{REPO}{f}"))
+                .get(format!("{}{f}", set.repo))
                 .send()
                 .await
                 .and_then(|r| r.error_for_status())
@@ -76,7 +108,7 @@ fn download(data_dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<(), String> 
                 }
                 std::io::Write::write_all(&mut out, &chunk).map_err(|e| e.to_string())?;
                 done += chunk.len() as u64;
-                if f == ONNX && done - last > 1_000_000 {
+                if i == 0 && done - last > 1_000_000 {
                     last = done;
                     progress(done, total);
                 }
@@ -90,31 +122,132 @@ fn download(data_dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<(), String> 
 
 const STOPPED: &str = "stopped";
 
-fn with_engine<T>(data_dir: &Path, f: impl FnOnce(&mut TextEmbedding) -> Result<T, String>) -> Result<T, String> {
-    use fastembed::{InitOptionsUserDefined, Pooling, QuantizationMode, TokenizerFiles, UserDefinedEmbeddingModel};
-    let mut g = ENGINE.lock().map_err(|e| e.to_string())?;
-    if g.is_none() {
-        if !model_present(data_dir) {
-            return Err(crate::settings::tr("A vektoros modell még nincs letöltve.", "The vector model has not been downloaded yet."));
+fn not_downloaded() -> String {
+    crate::settings::tr("A vektoros modell még nincs letöltve.", "The vector model has not been downloaded yet.")
+}
+
+fn load_err(e: impl std::fmt::Display) -> String {
+    format!("{}: {e}", crate::settings::tr("A vektoros modell nem tölthető be", "The vector model cannot be loaded"))
+}
+
+/// ONNX Runtime backend (every platform with a prebuilt ONNX Runtime).
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+mod engine {
+    use super::*;
+    use fastembed::TextEmbedding;
+
+    static ENGINE: Mutex<Option<TextEmbedding>> = Mutex::new(None);
+
+    fn with_engine<T>(data_dir: &Path, f: impl FnOnce(&mut TextEmbedding) -> Result<T, String>) -> Result<T, String> {
+        use fastembed::{InitOptionsUserDefined, Pooling, QuantizationMode, TokenizerFiles, UserDefinedEmbeddingModel};
+        let mut g = ENGINE.lock().map_err(|e| e.to_string())?;
+        if g.is_none() {
+            if !model_present(data_dir) {
+                return Err(not_downloaded());
+            }
+            let d = model_dir(data_dir);
+            let read = |f: &str| std::fs::read(d.join(f)).map_err(|e| e.to_string());
+            let tok = TokenizerFiles {
+                tokenizer_file: read("tokenizer.json")?,
+                config_file: read("config.json")?,
+                special_tokens_map_file: read("special_tokens_map.json")?,
+                tokenizer_config_file: read("tokenizer_config.json")?,
+            };
+            let model = UserDefinedEmbeddingModel::new(read(ONNX_FILES.files[0])?, tok).with_pooling(Pooling::Mean).with_quantization(QuantizationMode::Static);
+            let m = TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new().with_max_length(512)).map_err(load_err)?;
+            *g = Some(m);
         }
-        let d = model_dir(data_dir);
-        let read = |f: &str| std::fs::read(d.join(f)).map_err(|e| e.to_string());
-        let tok = TokenizerFiles {
-            tokenizer_file: read("tokenizer.json")?,
-            config_file: read("config.json")?,
-            special_tokens_map_file: read("special_tokens_map.json")?,
-            tokenizer_config_file: read("tokenizer_config.json")?,
-        };
-        let model = UserDefinedEmbeddingModel::new(read(ONNX)?, tok).with_pooling(Pooling::Mean).with_quantization(QuantizationMode::Static);
-        let m = TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new().with_max_length(512))
-            .map_err(|e| format!("{}: {e}", crate::settings::tr("A vektoros modell nem tölthető be", "The vector model cannot be loaded")))?;
-        *g = Some(m);
+        f(g.as_mut().unwrap())
     }
-    f(g.as_mut().unwrap())
+
+    pub fn embed_raw(data_dir: &Path, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        with_engine(data_dir, |m| m.embed(texts, Some(BATCH)).map_err(|e| e.to_string()))
+    }
+
+    pub fn load(data_dir: &Path) -> Result<(), String> {
+        with_engine(data_dir, |_| Ok(()))
+    }
+}
+
+/// candle backend (pure Rust): BERT encoder + mean pooling, like the ONNX export.
+#[cfg(any(feature = "candle", all(target_os = "macos", target_arch = "x86_64")))]
+pub mod candle_engine {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::VarBuilder;
+    use candle_transformers::models::bert::{BertModel, Config};
+    use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
+
+    pub struct Engine {
+        model: BertModel,
+        tok: Tokenizer,
+    }
+
+    static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+
+    fn open(dir: &Path) -> Result<Engine, String> {
+        let cfg: Config = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).map_err(load_err)?).map_err(load_err)?;
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[dir.join("model.safetensors")], DType::F32, &Device::Cpu).map_err(load_err)? };
+        let model = BertModel::load(vb, &cfg).map_err(load_err)?;
+        let mut tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(load_err)?;
+        tok.with_padding(Some(PaddingParams::default()));
+        tok.with_truncation(Some(TruncationParams { max_length: 512, ..Default::default() })).map_err(load_err)?;
+        Ok(Engine { model, tok })
+    }
+
+    fn run(e: &Engine, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let err = |x: candle_core::Error| x.to_string();
+        let mut out = vec![];
+        for part in texts.chunks(16) {
+            let enc = e.tok.encode_batch(part.to_vec(), true).map_err(|x| x.to_string())?;
+            let ids: Vec<Tensor> = enc.iter().map(|x| Tensor::new(x.get_ids(), &Device::Cpu)).collect::<Result<_, _>>().map_err(err)?;
+            let mask: Vec<Tensor> = enc.iter().map(|x| Tensor::new(x.get_attention_mask(), &Device::Cpu)).collect::<Result<_, _>>().map_err(err)?;
+            let ids = Tensor::stack(&ids, 0).map_err(err)?;
+            let mask = Tensor::stack(&mask, 0).map_err(err)?;
+            let types = ids.zeros_like().map_err(err)?;
+            let h = e.model.forward(&ids, &types, Some(&mask)).map_err(err)?;
+            // mean over the real tokens
+            let m = mask.to_dtype(DType::F32).map_err(err)?.unsqueeze(2).map_err(err)?;
+            let sum = h.broadcast_mul(&m).map_err(err)?.sum(1).map_err(err)?;
+            let n = m.sum(1).map_err(err)?;
+            let mean = sum.broadcast_div(&n).map_err(err)?;
+            out.extend(mean.to_vec2::<f32>().map_err(err)?);
+        }
+        Ok(out)
+    }
+
+    /// Embeds with the model files in `dir` (tests use their own folder).
+    pub fn embed_in(dir: &Path, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        let mut g = ENGINE.lock().map_err(|e| e.to_string())?;
+        if g.is_none() {
+            if !CANDLE_FILES.files.iter().all(|f| dir.join(f).is_file()) {
+                return Err(not_downloaded());
+            }
+            *g = Some(open(dir)?);
+        }
+        run(g.as_ref().unwrap(), &texts)
+    }
+
+    pub fn files_dir_of(data_dir: &Path) -> PathBuf {
+        files_dir(data_dir, &CANDLE_FILES)
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+mod engine {
+    use super::*;
+
+    pub fn embed_raw(data_dir: &Path, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+        candle_engine::embed_in(&model_dir(data_dir), texts)
+    }
+
+    pub fn load(data_dir: &Path) -> Result<(), String> {
+        candle_engine::embed_in(&model_dir(data_dir), vec!["query: x".into()]).map(|_| ())
+    }
 }
 
 fn embed(data_dir: &Path, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
-    with_engine(data_dir, |m| m.embed(texts, Some(BATCH)).map_err(|e| e.to_string())).map(|vs| vs.into_iter().map(normalize).collect())
+    engine::embed_raw(data_dir, texts).map(|vs| vs.into_iter().map(normalize).collect())
 }
 
 /// e5 models expect "query: " / "passage: " prefixes.
@@ -179,6 +312,9 @@ fn stale_pages(c: &Connection, skill_id: i64) -> Result<(Vec<(i64, i64, String)>
 #[derive(Serialize, Clone)]
 pub struct Status {
     pub model: String,
+    pub supported: bool,
+    /// model download size in MB
+    pub download_mb: u32,
     /// the model files are on disk
     pub ready: bool,
     pub running: bool,
@@ -197,7 +333,7 @@ pub fn status(c: &Connection, data_dir: &Path, skill_id: i64) -> Result<Status, 
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
-    Ok(Status { model: MODEL.into(), ready: model_present(data_dir), running: RUNNING.load(Ordering::SeqCst), pages: total, indexed: total - stale.len() as i64, chunks })
+    Ok(Status { model: MODEL.into(), supported: true, download_mb: DOWNLOAD_MB, ready: model_present(data_dir), running: RUNNING.load(Ordering::SeqCst), pages: total, indexed: total - stale.len() as i64, chunks })
 }
 
 /// The `k` chunks most similar to the query vector: (doc_id, page, chunk, score).
@@ -315,7 +451,7 @@ fn run(db_path: &Path, data_dir: &Path, skill_id: i64, emit: &dyn Fn(&str, i64, 
             r => r?,
         }
     }
-    with_engine(data_dir, |_| Ok(()))?;
+    engine::load(data_dir)?;
     let mut done = total - stale.len() as i64;
     emit("index", done, total, "");
     // pages are collected into batches of about BATCH chunks
@@ -371,6 +507,27 @@ mod tests {
         assert_eq!((r[0].1, r[0].2), (2, 0));
         assert_eq!((r[1].1, r[1].2), (1, 1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// candle vs ONNX on the same texts: SKILLSTAR_VEC_TEST=<dir> cargo test --features candle candle_matches -- --ignored
+    #[cfg(feature = "candle")]
+    #[test]
+    #[ignore]
+    fn candle_matches() {
+        let dir = PathBuf::from(std::env::var("SKILLSTAR_VEC_TEST").unwrap());
+        download(&dir, &|_, _| {}).unwrap();
+        download_files(&dir, &CANDLE_FILES, &|_, _| {}).unwrap();
+        let texts: Vec<String> = vec!["query: Hol van a megszakítás vektor?".into(), "passage: Az IRQ vektor a $0314 címen található, a KERNAL ide ugrik.".into(), "passage: A SID három hangcsatornát tartalmaz.".into()];
+        let a: Vec<Vec<f32>> = engine::embed_raw(&dir, texts.clone()).unwrap().into_iter().map(normalize).collect();
+        let t = std::time::Instant::now();
+        let b: Vec<Vec<f32>> = candle_engine::embed_in(&candle_engine::files_dir_of(&dir), texts).unwrap().into_iter().map(normalize).collect();
+        eprintln!("candle: {:?}", t.elapsed());
+        let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+        for i in 0..3 {
+            eprintln!("onnx vs candle {i}: {}", dot(&a[i], &b[i]));
+            assert!(dot(&a[i], &b[i]) > 0.95);
+        }
+        assert!(dot(&b[0], &b[1]) > dot(&b[0], &b[2]));
     }
 
     /// Real model: SKILLSTAR_VEC_TEST=<data dir> cargo test real_model -- --ignored
