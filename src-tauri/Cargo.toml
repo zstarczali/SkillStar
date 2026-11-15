@@ -31,6 +31,7 @@ flate2 = "1"
 tar = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 getrandom = "0.2"
+fastembed = { version = "7.7", default-features = false, features = ["ort-download-binaries-native-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_System_WinRT"] }

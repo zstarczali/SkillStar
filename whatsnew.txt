@@ -20,6 +20,13 @@ SkillStar - What's new
   as [Wn] and the web pages are listed under the answer.
 - Every answer shows where it comes from: knowledge base, web, or other
   (sentences without a citation, e.g. the AI's own knowledge).
+- Vector (semantic) search for RAG: a local multilingual model
+  (multilingual-e5-small, ~135 MB, downloaded once, offline and free)
+  finds the passages that fit the question even when the words differ.
+  Its results are fused with the full-text search; new documents get
+  their vectors automatically.
+- RAG searches every document of the skill, also the ones left out of
+  the package.
 - OCR language per document (Windows OCR language or Tesseract
   languages), and "Re-OCR with another language" for one or more
   documents. When the Hungarian OCR language is missing, the dialog

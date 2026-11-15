@@ -705,7 +705,7 @@ function sourceList(res) {
   const used = res.sources.filter((s) => cited.has(s.n));
   const rest = res.sources.filter((s) => !cited.has(s.n));
   const row = (s) => h('div.src', { title: s.text.slice(0, 600), on: { click: () => openSource(s) } },
-    h('span.n', String(s.n)), h('span.d', s.doc), h('span.p', t('{0}. oldal', s.page)),
+    h('span.n', String(s.n)), h('span.d', s.doc, s.via === 'vec' ? h('span.via', { title: t('Csak jelentés szerint találta (a kérdés szavai nem szerepelnek benne)') }, t('jelentés')) : null), h('span.p', t('{0}. oldal', s.page)),
     h('span.src-act',
       hasPageImage(s.kind) ? h('button.btn.xs', { title: t('Az oldal eredeti képe'), on: { click: (e) => { e.stopPropagation(); pageViewer(ctx, s); } } }, icon(s.kind === 'pdf' ? 'pdf' : 'image'), s.kind === 'pdf' ? 'PDF' : t('Kép')) : null,
       h('button.btn.xs', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: (e) => { e.stopPropagation(); openSource(s); } } }, icon('note'), t('Szöveg'))),
@@ -726,6 +726,52 @@ async function openSource(s) {
   setView('text');
 }
 
+/**
+ * The vector (semantic) index of the skill in the RAG panel: switch it on (downloads the
+ * local model once), see how far it is, refresh it, stop it.
+ */
+function vecChip(skillId) {
+  const box = h('span.vec-chip');
+  let un = null;
+  let live = null;
+  const draw = async () => {
+    if (!box.isConnected && un) { un(); un = null; return; }
+    let st;
+    try { st = await invoke('vector_status', { skillId }); } catch { box.replaceChildren(); return; }
+    const stop = h('button.icon-btn.sm', { title: t('Leállítás'), on: { click: () => invoke('vector_stop').catch(err) } }, icon('stop'));
+    const build = (label, title) => h('button.btn.xs', { title, on: { click: () => { invoke('vector_build', { skillId }).then(() => { live = { stage: 'index', done: st.indexed, total: st.pages }; paint(st); }).catch(err); } } }, icon('sparkle'), label);
+    const paint = (st) => {
+      if (live && live.stage === 'download') {
+        const pct = live.total ? Math.round((live.done / live.total) * 100) : 0;
+        box.replaceChildren(h('span.vec-st.run', { title: t('A helyi vektoros modell letöltése (egyszer, ~135 MB)') }, icon('refresh', 'spin'), t('Modell letöltése… {0}%', pct)), stop);
+      } else if (live && live.stage === 'index') {
+        const pct = live.total ? Math.round((live.done / live.total) * 100) : 0;
+        box.replaceChildren(h('span.vec-st.run', { title: t('Vektoros index építése: {0}/{1} oldal', live.done, live.total) }, icon('refresh', 'spin'), t('Vektorindex… {0}%', pct)), stop);
+      } else if (!st.ready) {
+        box.replaceChildren(build(t('Vektoros keresés'), t('Jelentés szerinti (szemantikus) keresés: a SkillStar egy helyi, többnyelvű modellel (multilingual-e5-small, ~135 MB, egyszer töltődik le) a szavak egyezése nélkül is megtalálja a kérdéshez illő részleteket. Offline és ingyenes.')));
+      } else if (st.pages && st.indexed >= st.pages) {
+        box.replaceChildren(h('span.vec-st.ok', { title: t('A kérdéseket jelentés szerint is keresi ({0} oldal, {1} részlet)', st.pages, st.chunks) }, icon('check'), t('Vektoros')));
+      } else if (st.indexed > 0) {
+        box.replaceChildren(h('span.vec-st.part', { title: t('A vektorindex hiányos: {0}/{1} oldal. Az új oldalakat csak szavak szerint keresi.', st.indexed, st.pages) }, t('Vektoros {0}/{1}', st.indexed, st.pages)), build(t('Frissítés'), t('A hiányzó oldalak vektorainak elkészítése')));
+      } else {
+        box.replaceChildren(build(t('Vektorindex építése'), t('A dokumentumok vektorainak elkészítése (oldalanként kb. 0,1–0,2 másodperc)')));
+      }
+    };
+    paint(st);
+    box._paint = () => paint(st);
+  };
+  window.__TAURI__.event.listen('vec-progress', ({ payload: p }) => {
+    if (!box.isConnected) { un?.(); un = null; return; }
+    if (p.skill_id !== skillId && skillId !== 0) return;
+    if (p.stage === 'download' || p.stage === 'index') { live = p; box._paint?.(); return; }
+    live = null;
+    if (p.stage === 'error') toast(t('Vektoros index: {0}', p.error), 'err');
+    draw();
+  }).then((f) => { un = f; });
+  draw();
+  return box;
+}
+
 function aiAsk(q) {
   const sk = curSkill();
   if (!sk) return;
@@ -740,6 +786,7 @@ function aiAsk(q) {
     h('span.rag-badge', 'RAG'),
     sw('expand', t('Keresés bővítése AI-val'), t('Az AI előbb keresőkifejezéseket ír (szinonimák, ragozott és idegen nyelvű alakok), így több releváns oldalt talál; +1 rövid AI-hívás')),
     S.skills.length > 1 ? sw('all', t('Minden skillben'), t('A keresés az összes skill dokumentumaiban')) : null,
+    vecChip(opt.all ? 0 : sk.id),
     sw('web', t('Keresés a weben is'), webOk ? t('Ha a dokumentumok nem elegendők, az AI a weben is keres (Anthropic webes keresés, keresésenként díjköteles); a webes állítások [Wn] hivatkozást kapnak') : t('A webes keresés csak az Anthropic API-val működik (Beállítások → AI).'), !webOk));
   const p = aiPanel(t('AI – {0}', sk.title), (question, chat) => invoke('ai_ask', { id: sk.id, question, chat, all: opt.all, expand: opt.expand, web: opt.web }),
     [t('Miről szólnak ezek a dokumentumok?'), t('Milyen kérdésekre tud válaszolni ez a skill?')], extra, {

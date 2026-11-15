@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::settings::{tr, Settings, SettingsStore};
-use crate::{ai, ocr, pdf, process, rag, skill};
+use crate::{ai, ocr, pdf, process, rag, skill, vector};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -675,8 +675,21 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
         }
     }
     let skill = if all.unwrap_or(false) { 0 } else { id };
+    // search by meaning too when the skill has a vector index (the model is loaded once)
+    let mut vec_hits: Vec<Vec<(i64, i64, usize, f32)>> = vec![];
+    let has_vectors = vector::model_present(&state.data_dir)
+        && state.with_db(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM vectors v JOIN documents d ON d.id = v.doc_id WHERE (?1 = 0 OR d.skill_id = ?1))", [skill], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string()))?;
+    if has_vectors {
+        let dir = state.data_dir.clone();
+        let qs = queries.clone();
+        if let Ok(Ok(qv)) = tauri::async_runtime::spawn_blocking(move || vector::embed_queries(&dir, &qs)).await {
+            for v in &qv {
+                vec_hits.push(state.with_db(|c| vector::search(c, skill, v, 25))?);
+            }
+        }
+    }
     let qs = queries.clone();
-    let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, 14, 60_000))?;
+    let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, &vec_hits, 14, 60_000))?;
     if sources.is_empty() && !use_web {
         let text = tr(
             "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, kapcsold be a „Keresés bővítése AI-val” lehetőséget, vagy keress a weben is.",
@@ -736,6 +749,23 @@ fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &st
         db::add_chat_turn(c, id, q, a, &src, &qs, &wb)?;
         Ok(id)
     })
+}
+
+#[tauri::command]
+pub fn vector_status(state: State<'_, AppState>, skill_id: i64) -> Result<vector::Status, String> {
+    state.with_db(|c| vector::status(c, &state.data_dir, skill_id))
+}
+
+/// Builds the vector index of a skill in the background (first use downloads the model); progress: "vec-progress".
+#[tauri::command]
+pub fn vector_build(app: tauri::AppHandle, state: State<'_, AppState>, skill_id: i64) -> Result<(), String> {
+    vector::start(app, state.db_path.clone(), state.data_dir.clone(), skill_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn vector_stop() {
+    vector::stop();
 }
 
 #[tauri::command]
