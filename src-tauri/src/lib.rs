@@ -132,6 +132,7 @@ pub fn run() {
             commands::pdfium_test,
             commands::reveal_in_explorer,
             commands::page_image,
+            commands::page_words,
             commands::vector_status,
             commands::vector_build,
             commands::vector_stop,

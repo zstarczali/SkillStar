@@ -87,6 +87,64 @@ pub fn ocr_file(path: &Path, cfg: &OcrCfg) -> Result<String, OcrError> {
     }
 }
 
+/// A word on a page image, its box as a fraction of the page (origin top left).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct WordBox {
+    pub t: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// OCR of an image with the place of every word (for highlighting on the page image).
+pub fn ocr_words(bytes: &[u8], cfg: &OcrCfg) -> Result<Vec<WordBox>, OcrError> {
+    match pick(cfg)? {
+        "windows" => win::recognize_words(bytes, &cfg.lang),
+        _ => {
+            let tmp = std::env::temp_dir().join(format!("skillstar-ocrw-{}-{}.png", std::process::id(), unique()));
+            std::fs::write(&tmp, bytes).map_err(|e| OcrError::Page(e.to_string()))?;
+            let r = tesseract_words(&tmp, cfg);
+            let _ = std::fs::remove_file(&tmp);
+            r
+        }
+    }
+}
+
+/// Tesseract TSV: level 1 is the page (its size), level 5 the words.
+fn tesseract_words(image: &Path, cfg: &OcrCfg) -> Result<Vec<WordBox>, OcrError> {
+    let exe = find_tesseract(&cfg.tesseract).ok_or_else(no_engine)?;
+    let lang = if cfg.tesseract_lang.trim().is_empty() { "eng" } else { cfg.tesseract_lang.trim() };
+    let out = command(&exe).arg(image).arg("stdout").args(["-l", lang, "--psm", "3", "tsv"]).output().map_err(|e| OcrError::Setup(format!("Tesseract: {e}")))?;
+    if !out.status.success() {
+        return Err(OcrError::Page(format!("Tesseract: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_tsv(tsv: &str) -> Vec<WordBox> {
+    let (mut pw, mut ph) = (0f32, 0f32);
+    let mut out = vec![];
+    for line in tsv.lines().skip(1) {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 12 {
+            continue;
+        }
+        let n = |i: usize| f[i].trim().parse::<f32>().unwrap_or(0.0);
+        match f[0] {
+            "1" => {
+                pw = n(8);
+                ph = n(9);
+            }
+            "5" if pw > 0.0 && ph > 0.0 && !f[11].trim().is_empty() => {
+                out.push(WordBox { t: f[11].trim().to_string(), x: n(6) / pw, y: n(7) / ph, w: n(8) / pw, h: n(9) / ph });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn unique() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
 }
@@ -255,7 +313,7 @@ mod win {
         e.map_err(|_| super::no_engine())
     }
 
-    pub fn recognize(bytes: &[u8], lang: &str) -> Result<String, OcrError> {
+    fn run(bytes: &[u8], lang: &str) -> Result<(windows::Media::Ocr::OcrResult, f32, f32), OcrError> {
         init();
         let engine = engine(lang)?;
         let page = |e: windows::core::Error| OcrError::Page(format!("Windows OCR: {e}"));
@@ -286,6 +344,26 @@ mod win {
             SoftwareBitmap::ConvertWithAlpha(&b, BitmapPixelFormat::Bgra8, BitmapAlphaMode::Premultiplied).map_err(page)?
         };
         let result = engine.RecognizeAsync(&bitmap).map_err(page)?.get().map_err(page)?;
+        Ok((result, bitmap.PixelWidth().unwrap_or(1).max(1) as f32, bitmap.PixelHeight().unwrap_or(1).max(1) as f32))
+    }
+
+    pub fn recognize_words(bytes: &[u8], lang: &str) -> Result<Vec<super::WordBox>, OcrError> {
+        let page = |e: windows::core::Error| OcrError::Page(format!("Windows OCR: {e}"));
+        let (result, w, h) = run(bytes, lang)?;
+        let mut out = vec![];
+        for line in result.Lines().map_err(page)? {
+            for wd in line.Words().map_err(page)? {
+                if let (Ok(t), Ok(r)) = (wd.Text(), wd.BoundingRect()) {
+                    out.push(super::WordBox { t: t.to_string(), x: r.X / w, y: r.Y / h, w: r.Width / w, h: r.Height / h });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn recognize(bytes: &[u8], lang: &str) -> Result<String, OcrError> {
+        let page = |e: windows::core::Error| OcrError::Page(format!("Windows OCR: {e}"));
+        let (result, _, _) = run(bytes, lang)?;
         let mut out = String::new();
         let mut last_bottom: Option<f32> = None;
         for line in result.Lines().map_err(page)? {
@@ -325,6 +403,9 @@ mod win {
         vec![]
     }
     pub fn recognize(_: &[u8], _: &str) -> Result<String, OcrError> {
+        Err(super::no_engine())
+    }
+    pub fn recognize_words(_: &[u8], _: &str) -> Result<Vec<super::WordBox>, OcrError> {
         Err(super::no_engine())
     }
 }

@@ -189,6 +189,90 @@ pub fn render_page(lib: &Path, path: &Path, page: i64, width: u32) -> Result<(Ve
     Ok((jpeg_of(&bmp)?, count))
 }
 
+/// The words of a PDF page's text layer with their boxes (fractions of the page, origin top left).
+pub fn page_words(lib: &Path, path: &Path, page: i64) -> Result<Vec<crate::ocr::WordBox>, String> {
+    use crate::ocr::WordBox;
+    let pdfium = bind(lib)?;
+    let doc = pdfium.load_pdf_from_file(path, None).map_err(|e| format!("{}: {e:?}", tr("A PDF nem nyitható meg", "The PDF could not be opened")))?;
+    let count = doc.pages().len() as i64;
+    let idx = (page.clamp(1, count.max(1)) - 1) as u16;
+    let p = doc.pages().get(idx).map_err(|e| format!("{e:?}"))?;
+    // char boxes are in the unrotated page space; the image is rendered rotated
+    let rot = match p.rotation() {
+        Ok(PdfPageRenderRotation::Degrees90) => 90,
+        Ok(PdfPageRenderRotation::Degrees180) => 180,
+        Ok(PdfPageRenderRotation::Degrees270) => 270,
+        _ => 0,
+    };
+    let (dw, dh) = (p.width().value, p.height().value);
+    let (pw, ph) = if rot == 90 || rot == 270 { (dh, dw) } else { (dw, dh) };
+    if pw <= 0.0 || ph <= 0.0 {
+        return Ok(vec![]);
+    }
+    let text = p.text().map_err(|e| format!("{e:?}"))?;
+    // unrotated (u, v from the top) → displayed
+    let turn = |u: f32, v: f32| -> (f32, f32) {
+        match rot {
+            90 => (1.0 - v, u),
+            180 => (1.0 - u, 1.0 - v),
+            270 => (v, 1.0 - u),
+            _ => (u, v),
+        }
+    };
+    let mut out: Vec<WordBox> = vec![];
+    // the word being collected: text, left, bottom, right, top (points), last char centre and size
+    struct Cur {
+        t: String,
+        l: f32,
+        b: f32,
+        r: f32,
+        tp: f32,
+        cx: f32,
+        cy: f32,
+        size: f32,
+    }
+    let mut cur: Option<Cur> = None;
+    let flush = |cur: &mut Option<Cur>, out: &mut Vec<WordBox>| {
+        if let Some(w) = cur.take() {
+            if !w.t.trim().is_empty() {
+                let (x1, y1) = turn(w.l / pw, 1.0 - w.tp / ph);
+                let (x2, y2) = turn(w.r / pw, 1.0 - w.b / ph);
+                out.push(WordBox { t: w.t, x: x1.min(x2), y: y1.min(y2), w: (x1 - x2).abs(), h: (y1 - y2).abs() });
+            }
+        }
+    };
+    for ch in text.chars().iter() {
+        let Some(c) = ch.unicode_char() else { continue };
+        if c.is_whitespace() || c == '\u{2}' || c == '\u{ad}' || c == '\u{fffe}' {
+            flush(&mut cur, &mut out);
+            continue;
+        }
+        let Ok(r) = ch.loose_bounds() else { continue };
+        let (l, b, rt, tp) = (r.left().value, r.bottom().value, r.right().value, r.top().value);
+        let (cx, cy) = ((l + rt) / 2.0, (b + tp) / 2.0);
+        let size = (tp - b).abs().max((rt - l).abs()).max(1.0);
+        match cur.as_mut() {
+            // the next letter of the word: close to the previous one, in any writing direction
+            Some(w) if ((cx - w.cx).powi(2) + (cy - w.cy).powi(2)).sqrt() < w.size.max(size) * 1.6 => {
+                w.t.push(c);
+                w.l = w.l.min(l);
+                w.b = w.b.min(b);
+                w.r = w.r.max(rt);
+                w.tp = w.tp.max(tp);
+                w.cx = cx;
+                w.cy = cy;
+                w.size = size;
+            }
+            _ => {
+                flush(&mut cur, &mut out);
+                cur = Some(Cur { t: c.to_string(), l, b, r: rt, tp, cx, cy, size });
+            }
+        }
+    }
+    flush(&mut cur, &mut out);
+    Ok(out)
+}
+
 fn jpeg_of(bmp: &PdfBitmap) -> Result<Vec<u8>, String> {
     let w = bmp.width() as u32;
     let h = bmp.height() as u32;
@@ -355,6 +439,28 @@ mod tests {
         assert!(render_page(Path::new(&lib), Path::new(&pdf), 99_999, 400).is_ok());
         if let Ok(out) = std::env::var("SKILLSTAR_PAGE_JPG") {
             std::fs::write(out, &jpg).unwrap();
+        }
+    }
+
+    /// SKILLSTAR_PDFIUM=… SKILLSTAR_TEST_PDF=… SKILLSTAR_WORDS_PAGE=n cargo test words_of_a_page -- --nocapture
+    #[test]
+    fn words_of_a_page() {
+        let (Ok(lib), Ok(pdf), Ok(page)) = (std::env::var("SKILLSTAR_PDFIUM"), std::env::var("SKILLSTAR_TEST_PDF"), std::env::var("SKILLSTAR_WORDS_PAGE")) else { return };
+        let w = page_words(Path::new(&lib), Path::new(&pdf), page.parse().unwrap()).unwrap();
+        eprintln!("{} words; first: {:?}", w.len(), w.iter().take(6).collect::<Vec<_>>());
+        for x in &w {
+            assert!(x.x >= -0.01 && x.x <= 1.01 && x.y >= -0.01 && x.y <= 1.01, "{x:?}");
+        }
+        if let Ok(js) = std::env::var("SKILLSTAR_WORDS_JSON") {
+            use base64::Engine;
+            let (jpg, _) = render_page(Path::new(&lib), Path::new(&pdf), page.parse().unwrap(), 900).unwrap();
+            std::fs::write(js, format!("{{\"img\":\"data:image/jpeg;base64,{}\",\"words\":{}}}", base64::engine::general_purpose::STANDARD.encode(&jpg), serde_json::to_string(&w).unwrap())).unwrap();
+        }
+        if let Ok(html) = std::env::var("SKILLSTAR_WORDS_HTML") {
+            use base64::Engine;
+            let (jpg, _) = render_page(Path::new(&lib), Path::new(&pdf), page.parse().unwrap(), 900).unwrap();
+            let boxes: String = w.iter().map(|b| format!("<i style='left:{}%;top:{}%;width:{}%;height:{}%'></i>", b.x * 100.0, b.y * 100.0, b.w * 100.0, b.h * 100.0)).collect();
+            std::fs::write(html, format!("<div style='position:relative;width:900px'><img style='width:100%;display:block' src='data:image/jpeg;base64,{}'>{boxes}</div><style>i{{position:absolute;background:rgba(255,200,0,.35);outline:1px solid rgba(255,120,0,.6)}}</style>", base64::engine::general_purpose::STANDARD.encode(&jpg))).unwrap();
         }
     }
 }

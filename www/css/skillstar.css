@@ -589,3 +589,11 @@ a.cite.web:hover { background: var(--mix-web); color: #1c1203; }
 .src .x { grid-column: 2 / span 3; }
 .src-act { display: inline-flex; gap: 4px; }
 .pv-fit.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 18%, var(--bg-2)); }
+
+/* page viewer: highlighted parts */
+.pv-page { position: relative; display: inline-block; line-height: 0; }
+.pv-page .pv-img { display: block; }
+.pv-marks { position: absolute; inset: 0; pointer-events: none; }
+.pv-mk { position: absolute; border-radius: 2px; mix-blend-mode: multiply; }
+.pv-mk.span { background: rgba(255, 214, 0, .38); box-shadow: 0 0 0 1px rgba(230, 170, 0, .35); }
+.pv-mk.term { background: rgba(255, 120, 0, .35); box-shadow: 0 0 0 1.5px rgba(255, 90, 0, .8); }
