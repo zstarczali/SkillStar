@@ -335,6 +335,85 @@ export const hasPageImage = (kind) => kind === 'pdf' || kind === 'image';
  * Shows the original page: PDF pages rendered by pdfium (page by page, zoom), images as they are.
  * src: { doc_id, doc (title), page, kind }. "Text" jumps to the extracted text of the same page.
  */
+/** Lower case without accents, punctuation trimmed: how words are compared on the page. */
+export const foldWord = (w) => String(w).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/^[^\p{L}\p{N}$]+|[^\p{L}\p{N}]+$/gu, '');
+
+/**
+ * What to highlight on a page image. `words`: [{t, x, y, w, h}] in page fractions;
+ * `passage`: the RAG passage of this page (its parts joined with "\n…\n");
+ * `terms`: folded search stems. The passage is found by aligning its first and last
+ * words with the page; if it is (nearly) the whole page, the sentences with the most
+ * search words are marked instead.
+ */
+export function pageMarks(words, passage, terms) {
+  const toks = words.map((w) => foldWord(w.t));
+  const isTerm = (tk) => tk.length >= 2 && terms.some((t) => (t.length <= 3 ? tk === t : tk.startsWith(t)));
+  const termIdx = toks.map((tk, i) => (isTerm(tk) ? i : -1)).filter((i) => i >= 0);
+  const span = new Set();
+  const K = 6;
+  // where a passage part starts (or ends) on the page: a page word that is one of the part's
+  // first (last) words, followed (preceded) by most of the others – a missing or misread word is fine
+  const align = (part, fromEnd) => {
+    const p = fromEnd ? part.slice(-K) : part.slice(0, K);
+    let best = -1;
+    let bestScore = 0;
+    for (let i = 0; i < toks.length; i++) {
+      if (toks[i] !== (fromEnd ? p[p.length - 1] : p[0]) && toks[i] !== (fromEnd ? p[p.length - 2] : p[1])) continue;
+      const win = fromEnd ? toks.slice(Math.max(0, i - K - 1), i + 1) : toks.slice(i, i + K + 2);
+      let sc = 0;
+      let at = 0;
+      for (const w of p) {
+        const k = win.indexOf(w, at);
+        if (k >= 0) { sc++; at = k + 1; }
+      }
+      if (sc > bestScore) { bestScore = sc; best = i; }
+    }
+    return bestScore >= Math.min(3, p.length) ? best : -1;
+  };
+  if (passage) {
+    for (const part of passage.split(/\n…\n/)) {
+      const pt = part.split(/\s+/).map(foldWord).filter(Boolean);
+      if (pt.length < 3) continue;
+      const a = align(pt, false);
+      const b = align(pt, true);
+      if (a >= 0 && b >= a) for (let i = a; i <= b; i++) span.add(i);
+      else if (a >= 0) for (let i = a; i < Math.min(toks.length, a + pt.length); i++) span.add(i);
+    }
+  }
+  // the passage is the whole page: the sentences richest in search words instead
+  if (span.size > toks.length * 0.85 || (!span.size && passage)) {
+    span.clear();
+    const sents = [];
+    let start = 0;
+    toks.forEach((_, i) => { if (/[.!?:;]$/.test(words[i].t) || i === toks.length - 1) { sents.push([start, i]); start = i + 1; } });
+    const scored = sents.map(([a, b]) => {
+      const hit = new Set();
+      for (let i = a; i <= b; i++) if (isTerm(toks[i])) terms.forEach((t) => { if (toks[i].startsWith(t)) hit.add(t); });
+      return { a, b, n: hit.size };
+    }).filter((x) => x.n >= Math.min(2, terms.length) && x.n > 0).sort((x, y) => y.n - x.n || x.a - y.a).slice(0, 3);
+    for (const sc of scored) for (let i = sc.a; i <= sc.b; i++) span.add(i);
+  }
+  // span words → one box per line
+  const spans = [];
+  let cur = null;
+  [...span].sort((a, b) => a - b).forEach((i) => {
+    const w = words[i];
+    if (cur && cur.last === i - 1 && Math.abs(w.y - cur.y) < Math.max(w.h, cur.h) * 0.6 && w.x >= cur.x - 0.01) {
+      const r = Math.max(cur.x + cur.w, w.x + w.w);
+      const bot = Math.max(cur.y + cur.h, w.y + w.h);
+      cur.y = Math.min(cur.y, w.y);
+      cur.w = r - cur.x;
+      cur.h = bot - cur.y;
+      cur.last = i;
+    } else {
+      cur = { x: w.x, y: w.y, w: w.w, h: w.h, last: i };
+      spans.push(cur);
+    }
+  });
+  const pad = (r) => ({ x: r.x - 0.003, y: r.y - 0.002, w: r.w + 0.006, h: r.h + 0.004 });
+  return { spans: spans.map(pad), terms: termIdx.map((i) => pad(words[i])) };
+}
+
 export function pageViewer(ctx, src) {
   document.querySelector('.pv-ov')?.remove();
   let page = Math.max(1, src.page || 1);
@@ -342,8 +421,15 @@ export function pageViewer(ctx, src) {
   let zoom = 0; // 0 = whole page, 1 = fit width, other = zoom of the width
   const cache = new Map();
   const img = h('img.pv-img', { alt: '' });
+  const marks = h('div.pv-marks');
+  const sheet = h('div.pv-page', img, marks);
   const status = h('div.pv-status');
-  const scroller = h('div.pv-body', img, status);
+  const scroller = h('div.pv-body', sheet, status);
+  // highlighting: the RAG passage on its page, the search words on every page
+  const terms = (src.terms || []).map(foldWord).filter((x) => x.length >= 2);
+  const canMark = !!(src.text || terms.length);
+  let showMarks = canMark;
+  const words = new Map();
   const pageInp = h('input.inp.pg-inp', { type: 'number', min: 1, value: page, on: { change: (e) => go(+e.target.value || 1) } });
   const count = h('span.sub');
   const zoomLbl = h('span.sub.pv-zoom');
@@ -378,15 +464,37 @@ export function pageViewer(ctx, src) {
       widthBtn.classList.toggle('on', zoom === 1);
       prev.disabled = page <= 1;
       next.disabled = page >= pages;
+      drawMarks(my);
     } catch (e) {
       if (my !== seq) return;
       status.textContent = String(e);
       status.className = 'pv-status err';
     }
   }
+  async function drawMarks(my) {
+    marks.replaceChildren();
+    markBtn?.classList.toggle('on', showMarks);
+    if (!canMark || !showMarks) return;
+    let ws = words.get(page);
+    if (!ws) {
+      status.textContent = t('Kiemelés…');
+      try { ws = (await invoke('page_words', { id: src.doc_id, page })).words; } catch { ws = []; }
+      words.set(page, ws);
+      if (my !== seq) return;
+      status.textContent = '';
+    }
+    const m = pageMarks(ws, page === src.page ? src.text : '', terms);
+    for (const r of m.spans) marks.append(h('i.pv-mk.span', { style: box(r) }));
+    for (const r of m.terms) marks.append(h('i.pv-mk.term', { style: box(r) }));
+    if (!m.spans.length && !m.terms.length && page === src.page) status.textContent = t('Ezen az oldalon nem találtam kiemelhető részt.');
+    const first = marks.querySelector('.pv-mk.span') || marks.querySelector('.pv-mk.term');
+    if (first && zoom !== 0) first.scrollIntoView({ block: 'center' });
+  }
+  const box = (r) => ({ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
   const go = (n) => { page = Math.max(1, pages ? Math.min(pages, n) : n); scroller.scrollTop = 0; load(); };
   const setZoom = (z) => { zoom = z === 0 ? 0 : Math.max(0.5, Math.min(3, z)); load(); };
   const step = (d) => setZoom((zoom || 1) + d);
+  const markBtn = canMark ? h('button.btn.sm.pv-fit', { title: t('A releváns részek kiemelése (H)'), on: { click: () => { showMarks = !showMarks; drawMarks(seq); } } }, icon('fmtMark'), t('Kiemelés')) : null;
   const fitBtn = h('button.btn.sm.pv-fit', { title: t('Egész oldal (0)'), on: { click: () => setZoom(0) } }, t('Egész oldal'));
   const widthBtn = h('button.btn.sm.pv-fit', { title: t('Oldalszélesség (1)'), on: { click: () => setZoom(1) } }, t('Szélesség'));
   const prev = h('button.icon-btn', { title: t('Előző oldal (←)'), on: { click: () => go(page - 1) } }, icon('dragUp'));
@@ -402,6 +510,7 @@ export function pageViewer(ctx, src) {
     else if (e.key === '-') { e.preventDefault(); step(-0.25); }
     else if (e.key === '0') { e.preventDefault(); setZoom(0); }
     else if (e.key === '1') { e.preventDefault(); setZoom(1); }
+    else if ((e.key === 'h' || e.key === 'H') && canMark) { e.preventDefault(); showMarks = !showMarks; drawMarks(seq); }
   };
   const ov = h('div.pv-ov', { on: { mousedown: (e) => { if (e.target === ov) close(); } } },
     h('div.pv',
@@ -411,6 +520,7 @@ export function pageViewer(ctx, src) {
         h('button.icon-btn', { title: t('Kicsinyítés (−)'), on: { click: () => step(-0.25) } }, h('b', '−')), zoomLbl,
         h('button.icon-btn', { title: t('Nagyítás (+)'), on: { click: () => step(0.25) } }, h('b', '+')),
         fitBtn, widthBtn,
+        markBtn ? [h('span.pv-sep'), markBtn] : null,
         h('span.pv-sep'),
         h('button.btn.sm', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: toText } }, icon('note'), t('Szöveg')),
         h('button.icon-btn', { title: t('Bezárás (Esc)'), on: { click: close } }, icon('close'))),

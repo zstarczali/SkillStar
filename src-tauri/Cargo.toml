@@ -1,6 +1,6 @@
 [package]
 name = "skillstar"
-version = "1.0.0"
+version = "1.1.0"
 description = "SkillStar - turns DOCX, PDF and other documents into Claude skill packages (local OCR, local database)"
 edition = "2021"
 
@@ -14,6 +14,8 @@ tauri-build = { version = "2", features = [] }
 [features]
 # the pure-Rust embedding backend (always on for Intel macOS); for tests elsewhere
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+# build as on Intel macOS (candle instead of ONNX Runtime), to check that code path
+candle-only = ["candle"]
 
 [dependencies]
 tauri = { version = "2", features = [] }

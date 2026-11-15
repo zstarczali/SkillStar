@@ -368,6 +368,51 @@ pub async fn page_image(app: tauri::AppHandle, state: State<'_, AppState>, id: i
     }
 }
 
+#[derive(Serialize)]
+pub struct PageWords {
+    pub words: Vec<ocr::WordBox>,
+    /// "text" (PDF text layer) | "ocr" (read from the page image now) | "none"
+    pub source: String,
+}
+
+/// The words of a page with their place on the page image, for highlighting the
+/// relevant parts: the PDF text layer, or OCR of the page image (scanned pages, images).
+#[tauri::command]
+pub async fn page_words(app: tauri::AppHandle, state: State<'_, AppState>, id: i64, page: i64) -> Result<PageWords, String> {
+    let doc = state.with_db(|c| db::document(c, id))?;
+    let path = std::path::PathBuf::from(&doc.path);
+    if !path.is_file() {
+        return Ok(PageWords { words: vec![], source: "none".into() });
+    }
+    let cfg = ocr_cfg_doc(&state.settings.get(), &doc.ocr_lang);
+    match doc.kind.as_str() {
+        "pdf" => {
+            let Some(lib) = state.pdfium(&app) else { return Ok(PageWords { words: vec![], source: "none".into() }) };
+            blocking(move || {
+                let words = pdf::page_words(&lib, &path, page)?;
+                // a text layer with a few words is not the page (scans with a stamp or page number)
+                if words.len() >= 15 {
+                    return Ok(PageWords { words, source: "text".into() });
+                }
+                let (jpg, _) = pdf::render_page(&lib, &path, page, 1800)?;
+                match ocr::ocr_words(&jpg, &cfg) {
+                    Ok(w) => Ok(PageWords { words: w, source: "ocr".into() }),
+                    Err(_) => Ok(PageWords { words, source: "text".into() }),
+                }
+            })
+            .await
+        }
+        "image" => {
+            blocking(move || {
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                Ok(PageWords { words: ocr::ocr_words(&bytes, &cfg).unwrap_or_default(), source: "ocr".into() })
+            })
+            .await
+        }
+        _ => Ok(PageWords { words: vec![], source: "none".into() }),
+    }
+}
+
 // ───────────────────────────── OCR / pdfium ─────────────────────────────
 
 #[derive(Serialize)]
@@ -629,6 +674,8 @@ pub struct AskResult {
     pub queries: Vec<String>,
     /// web pages found by the web search ([Wn] = web[n-1])
     pub web: Vec<ai::WebSource>,
+    /// the search stems of the queries (highlighting on the page image)
+    pub terms: Vec<String>,
 }
 
 /// AI in RAG mode: (AI-written extra search queries) → local full-text retrieval
@@ -696,7 +743,7 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
             "The search found no page that fits the question. Try other words, turn on “Expand the search with AI”, or search the web too.",
         );
         let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &[])?;
-        return Ok(AskResult { chat_id, text, sources, queries, web: vec![] });
+        return Ok(AskResult { chat_id, text, sources, terms: query_terms(&queries), queries, web: vec![] });
     }
     let mut user = rag::context(&sources);
     if !recent.is_empty() {
@@ -726,7 +773,17 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
         (ai_run(&cfg, ai::ask_system(&cfg.ai_language, false), user, 8000).await?, vec![])
     };
     let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries, &pages)?;
-    Ok(AskResult { chat_id, text, sources, queries, web: pages })
+    Ok(AskResult { chat_id, text, sources, terms: query_terms(&queries), queries, web: pages })
+}
+
+fn query_terms(queries: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for t in queries.iter().flat_map(|q| rag::terms(q)) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 /// Saves a question + answer into the conversation (a new one, named after the first question).

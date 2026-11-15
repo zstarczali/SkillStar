@@ -707,13 +707,26 @@ function sourceList(res) {
   const row = (s) => h('div.src', { title: s.text.slice(0, 600), on: { click: () => openSource(s) } },
     h('span.n', String(s.n)), h('span.d', s.doc, s.via === 'vec' ? h('span.via', { title: t('Csak jelentés szerint találta (a kérdés szavai nem szerepelnek benne)') }, t('jelentés')) : null), h('span.p', t('{0}. oldal', s.page)),
     h('span.src-act',
-      hasPageImage(s.kind) ? h('button.btn.xs', { title: t('Az oldal eredeti képe'), on: { click: (e) => { e.stopPropagation(); pageViewer(ctx, s); } } }, icon(s.kind === 'pdf' ? 'pdf' : 'image'), s.kind === 'pdf' ? 'PDF' : t('Kép')) : null,
+      hasPageImage(s.kind) ? h('button.btn.xs', { title: t('Az oldal eredeti képe, a releváns részek kiemelésével'), on: { click: (e) => { e.stopPropagation(); pageViewer(ctx, { ...s, terms: res.terms?.length ? res.terms : queryTerms(res.queries || []) }); } } }, icon(s.kind === 'pdf' ? 'pdf' : 'image'), s.kind === 'pdf' ? 'PDF' : t('Kép')) : null,
       h('button.btn.xs', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: (e) => { e.stopPropagation(); openSource(s); } } }, icon('note'), t('Szöveg'))),
     h('span.x', s.text.replace(/\s+/g, ' ').slice(0, 160)));
   const more = rest.length ? h('details.src-more', h('summary', t('További {0} keresett részlet', rest.length)), rest.map(row)) : null;
   // nothing cited: the search found these, but the answer did not use them
   if (!used.length) return h('details.srcs.unused', h('summary.srcs-h', icon('pages'), t('Keresett részletek ({0}) – a válasz egyiket sem használta', rest.length)), rest.map(row));
   return h('div.srcs', h('div.srcs-h', icon('pages'), t('Források')), used.map(row), more);
+}
+
+/** Search stems of the queries, like rag::terms (for answers saved before the backend sent them). */
+function queryTerms(qs) {
+  const out = [];
+  for (const q of qs) for (let w of q.split(/[^\p{L}\p{N}$_]+/u)) {
+    w = w.replace(/^\$+|\$+$/g, '').toLowerCase();
+    if (w.length < 3 || out.length >= 24) continue;
+    const n = [...w].length;
+    const st = n > 7 ? [...w].slice(0, Math.max(6, Math.floor((n * 2) / 3))).join('') : w;
+    if (!out.includes(st)) out.push(st);
+  }
+  return out;
 }
 
 /** Opens a cited page in the text view (switching skill if the source is in another one). */

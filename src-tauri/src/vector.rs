@@ -51,13 +51,13 @@ pub const CANDLE_FILES: Files = Files {
     dir: "multilingual-e5-small-f32",
 };
 
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg(not(candle_engine))]
 const FILES: &Files = &ONNX_FILES;
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[cfg(candle_engine)]
 const FILES: &Files = &CANDLE_FILES;
 
 /// Download size of the model in MB (for the UI).
-pub const DOWNLOAD_MB: u32 = if cfg!(all(target_os = "macos", target_arch = "x86_64")) { 490 } else { 135 };
+pub const DOWNLOAD_MB: u32 = if cfg!(candle_engine) { 490 } else { 135 };
 
 fn files_dir(data_dir: &Path, f: &Files) -> PathBuf {
     data_dir.join("models").join(f.dir)
@@ -131,7 +131,7 @@ fn load_err(e: impl std::fmt::Display) -> String {
 }
 
 /// ONNX Runtime backend (every platform with a prebuilt ONNX Runtime).
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg(not(candle_engine))]
 mod engine {
     use super::*;
     use fastembed::TextEmbedding;
@@ -170,7 +170,7 @@ mod engine {
 }
 
 /// candle backend (pure Rust): BERT encoder + mean pooling, like the ONNX export.
-#[cfg(any(feature = "candle", all(target_os = "macos", target_arch = "x86_64")))]
+#[cfg(any(feature = "candle", candle_engine))]
 pub mod candle_engine {
     use super::*;
     use candle_core::{DType, Device, Tensor};
@@ -228,12 +228,13 @@ pub mod candle_engine {
         run(g.as_ref().unwrap(), &texts)
     }
 
+    #[allow(dead_code)]
     pub fn files_dir_of(data_dir: &Path) -> PathBuf {
         files_dir(data_dir, &CANDLE_FILES)
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[cfg(candle_engine)]
 mod engine {
     use super::*;
 
