@@ -9,7 +9,7 @@ import { t, setLang, getLang } from './i18n.js';
 import { mdRender } from './markdown.js';
 import {
   renderSidebar, renderViewTabs, renderDocs, renderText, renderSkillForm, renderBuild, renderSearch,
-  editDocDlg, forgetText, DOC_FILTER, err, engineIndicator,
+  editDocDlg, forgetText, DOC_FILTER, err, engineIndicator, pageViewer, hasPageImage,
 } from './skills.js';
 
 // ───────────────────────── state ─────────────────────────
@@ -555,7 +555,11 @@ function sourceList(res) {
   const used = res.sources.filter((s) => cited.has(s.n));
   const rest = res.sources.filter((s) => !cited.has(s.n));
   const row = (s) => h('div.src', { title: s.text.slice(0, 600), on: { click: () => openSource(s) } },
-    h('span.n', String(s.n)), h('span.d', s.doc), h('span.p', t('{0}. oldal', s.page)), h('span.x', s.text.replace(/\s+/g, ' ').slice(0, 160)));
+    h('span.n', String(s.n)), h('span.d', s.doc), h('span.p', t('{0}. oldal', s.page)),
+    h('span.src-act',
+      hasPageImage(s.kind) ? h('button.btn.xs', { title: t('Az oldal eredeti képe'), on: { click: (e) => { e.stopPropagation(); pageViewer(ctx, s); } } }, icon(s.kind === 'pdf' ? 'pdf' : 'image'), s.kind === 'pdf' ? 'PDF' : t('Kép')) : null,
+      h('button.btn.xs', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: (e) => { e.stopPropagation(); openSource(s); } } }, icon('note'), t('Szöveg'))),
+    h('span.x', s.text.replace(/\s+/g, ' ').slice(0, 160)));
   const more = rest.length ? h('details.src-more', h('summary', t('További {0} keresett részlet', rest.length)), rest.map(row)) : null;
   return h('div.srcs', h('div.srcs-h', icon('pages'), t('Források')), used.length ? used.map(row) : null, used.length ? more : rest.map(row));
 }

@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS outline (
   PRIMARY KEY (doc_id, ord)
 );
 -- pages finished by a run that was interrupted (cancel, error, app closed): resumed next time
+-- RAG conversations of the AI panel
+CREATE TABLE IF NOT EXISTS chats (
+  id INTEGER PRIMARY KEY,
+  skill_id INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_turns (
+  id INTEGER PRIMARY KEY,
+  chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  q TEXT NOT NULL,
+  a TEXT NOT NULL,
+  sources TEXT NOT NULL DEFAULT '[]',
+  queries TEXT NOT NULL DEFAULT '[]',
+  created INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_turns_chat ON chat_turns(chat_id, id);
 CREATE TABLE IF NOT EXISTS partial_pages (
   doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   sha TEXT NOT NULL,
@@ -458,6 +476,86 @@ pub fn outline(c: &Connection, doc_id: i64) -> Result<Vec<OutlineItem>, String> 
     rows.collect::<Result<Vec<_>, _>>().map_err(e)
 }
 
+// ───────────────────────── RAG conversations ─────────────────────────
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Chat {
+    pub id: i64,
+    pub skill_id: i64,
+    pub title: String,
+    pub created: i64,
+    pub updated: i64,
+    pub turns: i64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ChatTurn {
+    pub id: i64,
+    pub q: String,
+    pub a: String,
+    /// rag::Passage list as JSON
+    pub sources: serde_json::Value,
+    pub queries: serde_json::Value,
+    pub created: i64,
+}
+
+/// Conversations of a skill, newest first.
+pub fn chats(c: &Connection, skill_id: i64) -> Result<Vec<Chat>, String> {
+    let mut st = c
+        .prepare("SELECT ch.id, ch.skill_id, ch.title, ch.created, ch.updated, (SELECT COUNT(*) FROM chat_turns t WHERE t.chat_id = ch.id) FROM chats ch WHERE ch.skill_id = ?1 ORDER BY ch.updated DESC, ch.id DESC")
+        .map_err(e)?;
+    let rows = st
+        .query_map([skill_id], |r| Ok(Chat { id: r.get(0)?, skill_id: r.get(1)?, title: r.get(2)?, created: r.get(3)?, updated: r.get(4)?, turns: r.get(5)? }))
+        .map_err(e)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(e)
+}
+
+pub fn chat_turns(c: &Connection, chat_id: i64) -> Result<Vec<ChatTurn>, String> {
+    let mut st = c.prepare("SELECT id, q, a, sources, queries, created FROM chat_turns WHERE chat_id = ?1 ORDER BY id").map_err(e)?;
+    let rows = st
+        .query_map([chat_id], |r| {
+            let src: String = r.get(3)?;
+            let qs: String = r.get(4)?;
+            Ok(ChatTurn {
+                id: r.get(0)?,
+                q: r.get(1)?,
+                a: r.get(2)?,
+                sources: serde_json::from_str(&src).unwrap_or(serde_json::Value::Array(vec![])),
+                queries: serde_json::from_str(&qs).unwrap_or(serde_json::Value::Array(vec![])),
+                created: r.get(5)?,
+            })
+        })
+        .map_err(e)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(e)
+}
+
+pub fn create_chat(c: &Connection, skill_id: i64, title: &str) -> Result<i64, String> {
+    let t = now();
+    c.execute("INSERT INTO chats (skill_id, title, created, updated) VALUES (?1, ?2, ?3, ?3)", params![skill_id, title.trim(), t]).map_err(e)?;
+    Ok(c.last_insert_rowid())
+}
+
+pub fn add_chat_turn(c: &Connection, chat_id: i64, q: &str, a: &str, sources: &str, queries: &str) -> Result<(), String> {
+    let t = now();
+    c.execute(
+        "INSERT INTO chat_turns (chat_id, q, a, sources, queries, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![chat_id, q, a, sources, queries, t],
+    )
+    .map_err(e)?;
+    c.execute("UPDATE chats SET updated=?2 WHERE id=?1", params![chat_id, t]).map_err(e)?;
+    Ok(())
+}
+
+pub fn rename_chat(c: &Connection, id: i64, title: &str) -> Result<(), String> {
+    c.execute("UPDATE chats SET title=?2 WHERE id=?1", params![id, title.trim()]).map_err(e)?;
+    Ok(())
+}
+
+pub fn delete_chat(c: &Connection, id: i64) -> Result<(), String> {
+    c.execute("DELETE FROM chats WHERE id=?1", [id]).map_err(e)?;
+    Ok(())
+}
+
 // ───────────────────────── resumable processing ─────────────────────────
 
 /// Pages of an interrupted run of this exact file (same hash); others are dropped.
@@ -496,6 +594,8 @@ pub fn clear_partial(c: &Connection, doc_id: i64) -> Result<(), String> {
 pub struct Hit {
     pub doc_id: i64,
     pub skill_id: i64,
+    /// document kind (pdf, docx…): the UI offers the page image of PDFs and images
+    pub kind: String,
     pub doc: String,
     pub page: i64,
     pub snippet: String,
@@ -534,7 +634,7 @@ fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<
     let mut st = c
         .prepare(
             "SELECT f.doc_id, CASE WHEN d.title <> '' THEN d.title ELSE d.name END, f.no,
-                    snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text, d.skill_id
+                    snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text, d.skill_id, d.kind
              FROM pages_fts f JOIN documents d ON d.id = f.doc_id
              WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND d.include = 1
              ORDER BY bm25(pages_fts) LIMIT ?3",
@@ -542,7 +642,7 @@ fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64) -> Result<Vec<
         .map_err(e)?;
     let rows = st
         .query_map(params![m, skill_id, limit], |r| {
-            Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)?, skill_id: r.get(5)? })
+            Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)?, skill_id: r.get(5)?, kind: r.get(6)? })
         })
         .map_err(e)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(e)
@@ -589,6 +689,17 @@ mod tests {
         assert_eq!(partial_pages(&c, d, "h1").unwrap().len(), 1);
         assert!(partial_pages(&c, d, "h2").unwrap().is_empty());
         assert_eq!(document(&c, d).unwrap().partial, 0);
+        // conversations: newest first, turns in order, removed with the chat
+        let ch = create_chat(&c, s, "Első kérdés").unwrap();
+        add_chat_turn(&c, ch, "k1", "v1 [1]", r#"[{"n":1}]"#, r#"["k1"]"#).unwrap();
+        add_chat_turn(&c, ch, "k2", "v2", "[]", "[]").unwrap();
+        let list = chats(&c, s).unwrap();
+        assert_eq!((list.len(), list[0].turns), (1, 2));
+        let turns = chat_turns(&c, ch).unwrap();
+        assert_eq!(turns[0].q, "k1");
+        assert_eq!(turns[0].sources[0]["n"], 1);
+        delete_chat(&c, ch).unwrap();
+        assert!(chat_turns(&c, ch).unwrap().is_empty());
         set_page_text(&c, d, 2, "Sprite multiplexer javítva").unwrap();
         assert_eq!(search(&c, s, "javitva", 10).unwrap().len(), 1);
         delete_skill(&c, s).unwrap();

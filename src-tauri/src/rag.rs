@@ -15,6 +15,7 @@ pub struct Passage {
     pub n: usize,
     pub doc_id: i64,
     pub skill_id: i64,
+    pub kind: String,
     pub doc: String,
     pub page: i64,
     pub text: String,
@@ -110,7 +111,7 @@ pub fn retrieve(c: &Connection, skill_id: i64, queries: &[String], k: usize, bud
             break;
         }
         size += text.len();
-        out.push(Passage { n: out.len() + 1, doc_id: h.doc_id, skill_id: h.skill_id, doc: h.doc, page: h.page, text });
+        out.push(Passage { n: out.len() + 1, doc_id: h.doc_id, skill_id: h.skill_id, kind: h.kind, doc: h.doc, page: h.page, text });
     }
     Ok(out)
 }

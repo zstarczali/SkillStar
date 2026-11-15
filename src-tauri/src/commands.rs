@@ -324,6 +324,50 @@ pub fn skill_out_dir(state: State<'_, AppState>, id: i64) -> Result<String, Stri
     Ok(skill::out_root(&s.output_dir, &sk.out_dir, &state.default_out).join(&sk.name).to_string_lossy().into_owned())
 }
 
+// ───────────────────────────── page images ─────────────────────────────
+
+#[derive(Serialize)]
+pub struct PageImage {
+    /// data: URL of the picture
+    pub url: String,
+    pub page: i64,
+    pub pages: i64,
+}
+
+/// The original look of a page: a PDF page rendered by pdfium, or the image file itself.
+#[tauri::command]
+pub async fn page_image(app: tauri::AppHandle, state: State<'_, AppState>, id: i64, page: i64, width: Option<u32>) -> Result<PageImage, String> {
+    use base64::Engine;
+    let doc = state.with_db(|c| db::document(c, id))?;
+    let path = std::path::PathBuf::from(&doc.path);
+    if !path.is_file() {
+        return Err(format!("{}: {}", tr("Az eredeti fájl nem található", "The original file is missing"), doc.path));
+    }
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    match doc.kind.as_str() {
+        "pdf" => {
+            let lib = state.pdfium(&app).ok_or_else(|| tr("A PDF megjelenítéséhez pdfium kell (Beállítások → Szövegkinyerés).", "Showing the PDF needs pdfium (Settings → Extraction)."))?;
+            let w = width.unwrap_or(1400);
+            let (jpg, pages) = blocking(move || pdf::render_page(&lib, &path, page, w)).await?;
+            Ok(PageImage { url: format!("data:image/jpeg;base64,{}", b64(&jpg)), page: page.clamp(1, pages), pages })
+        }
+        "image" => {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "bmp" => "image/bmp",
+                "webp" => "image/webp",
+                "tif" | "tiff" => "image/tiff",
+                _ => "image/png",
+            };
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            Ok(PageImage { url: format!("data:{mime};base64,{}", b64(&bytes)), page: 1, pages: 1 })
+        }
+        _ => Err(tr("Ennek a dokumentumnak nincs oldalképe (csak PDF-nél és képnél).", "This document has no page image (PDFs and images only).")),
+    }
+}
+
 // ───────────────────────────── OCR / pdfium ─────────────────────────────
 
 #[derive(Serialize)]
@@ -576,6 +620,8 @@ pub async fn ai_skill_description(state: State<'_, AppState>, id: i64) -> Result
 
 #[derive(Serialize)]
 pub struct AskResult {
+    /// the conversation the turn was saved into
+    pub chat_id: i64,
     pub text: String,
     /// the passages the answer could cite ([n] = passages[n-1])
     pub sources: Vec<rag::Passage>,
@@ -586,14 +632,18 @@ pub struct AskResult {
 /// AI in RAG mode: (AI-written extra search queries) → local full-text retrieval
 /// → numbered passages → answer with [n] citations. `all`: every skill.
 #[tauri::command]
-pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>) -> Result<AskResult, String> {
+pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>, chat: Option<i64>) -> Result<AskResult, String> {
     let cfg = state.settings.get();
     ai_check(&cfg)?;
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err(tr("Írj be egy kérdést.", "Type a question."));
     }
-    let history = history.unwrap_or_default();
+    // the earlier turns: from the saved conversation, else what the panel sent
+    let history: Vec<Turn> = match chat {
+        Some(ch) => state.with_db(|c| db::chat_turns(c, ch))?.into_iter().map(|t| Turn { q: t.q, a: t.a }).collect(),
+        None => history.unwrap_or_default(),
+    };
     let recent: Vec<&Turn> = history.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
     let mut queries = vec![question.clone()];
     if expand.unwrap_or(true) {
@@ -625,14 +675,12 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
     let qs = queries.clone();
     let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, 14, 60_000))?;
     if sources.is_empty() {
-        return Ok(AskResult {
-            text: tr(
-                "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, vagy kapcsold be a „Keresés bővítése AI-val” lehetőséget.",
-                "The search found no page that fits the question. Try other words, or turn on “Expand the search with AI”.",
-            ),
-            sources,
-            queries,
-        });
+        let text = tr(
+            "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, vagy kapcsold be a „Keresés bővítése AI-val” lehetőséget.",
+            "The search found no page that fits the question. Try other words, or turn on “Expand the search with AI”.",
+        );
+        let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
+        return Ok(AskResult { chat_id, text, sources, queries });
     }
     let mut user = rag::context(&sources);
     if !recent.is_empty() {
@@ -645,7 +693,48 @@ pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, histo
     }
     user.push_str(&format!("\nQuestion: {question}"));
     let text = ai_run(&cfg, ai::ask_system(&cfg.ai_language), user, 8000).await?;
-    Ok(AskResult { text, sources, queries })
+    let chat_id = save_turn(&state, id, chat, &question, &text, &sources, &queries)?;
+    Ok(AskResult { chat_id, text, sources, queries })
+}
+
+/// Saves a question + answer into the conversation (a new one, named after the first question).
+fn save_turn(state: &AppState, skill_id: i64, chat: Option<i64>, q: &str, a: &str, sources: &[rag::Passage], queries: &[String]) -> Result<i64, String> {
+    let src = serde_json::to_string(sources).unwrap_or_else(|_| "[]".into());
+    let qs = serde_json::to_string(queries).unwrap_or_else(|_| "[]".into());
+    state.with_db(|c| {
+        let id = match chat {
+            Some(ch) => ch,
+            None => {
+                let mut title: String = q.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(70).collect();
+                if q.chars().count() > 70 {
+                    title.push('…');
+                }
+                db::create_chat(c, skill_id, &title)?
+            }
+        };
+        db::add_chat_turn(c, id, q, a, &src, &qs)?;
+        Ok(id)
+    })
+}
+
+#[tauri::command]
+pub fn chat_list(state: State<'_, AppState>, skill_id: i64) -> Result<Vec<db::Chat>, String> {
+    state.with_db(|c| db::chats(c, skill_id))
+}
+
+#[tauri::command]
+pub fn chat_turns(state: State<'_, AppState>, id: i64) -> Result<Vec<db::ChatTurn>, String> {
+    state.with_db(|c| db::chat_turns(c, id))
+}
+
+#[tauri::command]
+pub fn chat_rename(state: State<'_, AppState>, id: i64, title: String) -> Result<(), String> {
+    state.with_db(|c| db::rename_chat(c, id, &title))
+}
+
+#[tauri::command]
+pub fn chat_delete(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    state.with_db(|c| db::delete_chat(c, id))
 }
 
 /// Settings → AI → Test: a tiny request with the values typed in the dialog.

@@ -516,3 +516,23 @@ a.cite:hover { background: var(--accent); color: var(--accent-text, #fff); }
 .ocr-help b svg.i { width: 16px; height: 16px; }
 .ocr-cmd { display: flex; align-items: center; gap: 6px; }
 .ocr-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 4px 8px; border-radius: 5px; background: var(--code-bg); font-size: 12px; }
+
+/* page viewer: the original look of a PDF page / image */
+.pv-ov { position: fixed; inset: 0; z-index: 950; background: rgba(0, 0, 0, 0.55); display: flex; align-items: stretch; justify-content: center; padding: 28px; }
+.pv { flex: 1; max-width: 1500px; display: flex; flex-direction: column; min-height: 0; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+.pv .pane-h { gap: 6px; flex-wrap: wrap; }
+.pv-title { font-weight: 600; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.pv-zoom { min-width: 8px; text-align: center; }
+.pv-body { flex: 1; overflow: auto; background: color-mix(in srgb, var(--bg) 70%, #000); padding: 20px; text-align: center; position: relative; }
+.pv-img { display: block; margin: 0 auto; background: #fff; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45); }
+.pv-img:not([src]) { display: none; }
+.pv-status { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 4px 12px; border-radius: 12px; background: var(--bg-2); color: var(--text-dim); font-size: 12px; }
+.pv-status:empty { display: none; }
+.pv-status.err { color: var(--danger); position: static; transform: none; display: inline-block; margin-top: 40px; }
+.btn.xs { padding: 1px 6px; font-size: 11px; gap: 3px; }
+.btn.xs svg.i { width: 12px; height: 12px; }
+.src { grid-template-columns: 22px minmax(0, 1fr) auto auto; }
+.src .x { grid-column: 2 / span 3; }
+.src-act { display: inline-flex; gap: 4px; }
+.pv-fit.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 18%, var(--bg-2)); }

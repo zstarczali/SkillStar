@@ -327,6 +327,99 @@ function ocrLangSelect(ctx, value) {
   return s;
 }
 
+// ───────────────────────── page viewer (original look of a PDF page / image) ─────────────────────────
+
+export const hasPageImage = (kind) => kind === 'pdf' || kind === 'image';
+
+/**
+ * Shows the original page: PDF pages rendered by pdfium (page by page, zoom), images as they are.
+ * src: { doc_id, doc (title), page, kind }. "Text" jumps to the extracted text of the same page.
+ */
+export function pageViewer(ctx, src) {
+  document.querySelector('.pv-ov')?.remove();
+  let page = Math.max(1, src.page || 1);
+  let pages = 0;
+  let zoom = 0; // 0 = whole page, 1 = fit width, other = zoom of the width
+  const cache = new Map();
+  const img = h('img.pv-img', { alt: '' });
+  const status = h('div.pv-status');
+  const scroller = h('div.pv-body', img, status);
+  const pageInp = h('input.inp.pg-inp', { type: 'number', min: 1, value: page, on: { change: (e) => go(+e.target.value || 1) } });
+  const count = h('span.sub');
+  const zoomLbl = h('span.sub.pv-zoom');
+  const want = () => Math.min(3000, Math.max(400, Math.round((scroller.clientWidth - 40) * (zoom || 1) * (window.devicePixelRatio || 1) / 200) * 200));
+  let seq = 0;
+  async function load() {
+    const my = ++seq;
+    const w = want();
+    const key = `${page}@${w}`;
+    status.textContent = t('Betöltés…');
+    status.className = 'pv-status';
+    try {
+      let r = cache.get(key);
+      if (!r) {
+        r = await invoke('page_image', { id: src.doc_id, page, width: w });
+        cache.set(key, r);
+      }
+      if (my !== seq) return;
+      pages = r.pages;
+      page = r.page;
+      img.src = r.url;
+      const fitPage = zoom === 0;
+      img.style.width = fitPage ? 'auto' : zoom === 1 ? 'min(100%, 1400px)' : `${Math.round((scroller.clientWidth - 40) * zoom)}px`;
+      img.style.maxWidth = fitPage ? '100%' : 'none';
+      img.style.maxHeight = fitPage ? `${scroller.clientHeight - 40}px` : 'none';
+      status.textContent = '';
+      pageInp.value = page;
+      pageInp.max = pages;
+      count.textContent = `/ ${pages}`;
+      zoomLbl.textContent = zoom === 0 || zoom === 1 ? '' : `${Math.round(zoom * 100)}%`;
+      fitBtn.classList.toggle('on', zoom === 0);
+      widthBtn.classList.toggle('on', zoom === 1);
+      prev.disabled = page <= 1;
+      next.disabled = page >= pages;
+    } catch (e) {
+      if (my !== seq) return;
+      status.textContent = String(e);
+      status.className = 'pv-status err';
+    }
+  }
+  const go = (n) => { page = Math.max(1, pages ? Math.min(pages, n) : n); scroller.scrollTop = 0; load(); };
+  const setZoom = (z) => { zoom = z === 0 ? 0 : Math.max(0.5, Math.min(3, z)); load(); };
+  const step = (d) => setZoom((zoom || 1) + d);
+  const fitBtn = h('button.btn.sm.pv-fit', { title: t('Egész oldal (0)'), on: { click: () => setZoom(0) } }, t('Egész oldal'));
+  const widthBtn = h('button.btn.sm.pv-fit', { title: t('Oldalszélesség (1)'), on: { click: () => setZoom(1) } }, t('Szélesség'));
+  const prev = h('button.icon-btn', { title: t('Előző oldal (←)'), on: { click: () => go(page - 1) } }, icon('dragUp'));
+  const next = h('button.icon-btn', { title: t('Következő oldal (→)'), on: { click: () => go(page + 1) } }, icon('chev'));
+  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
+  const toText = () => { close(); ctx.S.textDoc = src.doc_id; ctx.S.textPage = page; ctx.S.textFind = ''; ctx.setView('text'); };
+  const onKey = (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); go(page + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(page - 1); }
+    else if (e.key === '+' || e.key === '=') { e.preventDefault(); step(0.25); }
+    else if (e.key === '-') { e.preventDefault(); step(-0.25); }
+    else if (e.key === '0') { e.preventDefault(); setZoom(0); }
+    else if (e.key === '1') { e.preventDefault(); setZoom(1); }
+  };
+  const ov = h('div.pv-ov', { on: { mousedown: (e) => { if (e.target === ov) close(); } } },
+    h('div.pv',
+      h('div.pane-h',
+        icon(src.kind === 'pdf' ? 'pdf' : 'image'), h('span.pv-title', { title: src.doc }, src.doc), h('span.grow'),
+        src.kind === 'pdf' ? [prev, pageInp, count, next, h('span.pv-sep')] : null,
+        h('button.icon-btn', { title: t('Kicsinyítés (−)'), on: { click: () => step(-0.25) } }, h('b', '−')), zoomLbl,
+        h('button.icon-btn', { title: t('Nagyítás (+)'), on: { click: () => step(0.25) } }, h('b', '+')),
+        fitBtn, widthBtn,
+        h('span.pv-sep'),
+        h('button.btn.sm', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: toText } }, icon('note'), t('Szöveg')),
+        h('button.icon-btn', { title: t('Bezárás (Esc)'), on: { click: close } }, icon('close'))),
+      scroller));
+  document.body.append(ov);
+  document.addEventListener('keydown', onKey, true);
+  requestAnimationFrame(load);
+}
+
 // ───────────────────────── text ─────────────────────────
 
 export function renderText(ctx, el) {
@@ -396,12 +489,14 @@ async function loadText(ctx, main) {
       pageInp, h('span.sub', `/ ${total}`),
       h('button.icon-btn', { title: t('Következő oldal (PgDn)'), disabled: S.textPage >= total || null, on: { click: () => go(S.textPage + 1) } }, icon('chev')),
       saveBtn,
+      hasPageImage(data.doc.kind) ? h('button.btn.sm', { title: t('Az oldal eredeti képe (Ctrl+P)'), on: { click: () => pageViewer(ctx, { doc_id: data.doc.id, doc: docTitle(data.doc), page: S.textPage, kind: data.doc.kind }) } }, icon(data.doc.kind === 'pdf' ? 'pdf' : 'image'), data.doc.kind === 'pdf' ? 'PDF' : t('Kép')) : null,
       h('button.icon-btn', { title: t('Eredeti fájl megnyitása'), on: { click: () => invoke('open_file', { path: data.doc.path }).catch(err) } }, icon('open'))),
     h('div.tx-body', outline, ta));
   main.onkeydown = (e) => {
     if (e.target === pageInp) return;
     if (e.key === 'PageDown' && e.ctrlKey) { e.preventDefault(); go(S.textPage + 1); }
     if (e.key === 'PageUp' && e.ctrlKey) { e.preventDefault(); go(S.textPage - 1); }
+    if (e.key.toLowerCase() === 'p' && e.ctrlKey && hasPageImage(data.doc.kind)) { e.preventDefault(); pageViewer(ctx, { doc_id: data.doc.id, doc: docTitle(data.doc), page: S.textPage, kind: data.doc.kind }); }
   };
   if (S.textFind) {
     const i = ta.value.toLowerCase().indexOf(S.textFind.toLowerCase());

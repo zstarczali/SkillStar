@@ -173,6 +173,46 @@ pub fn extract(path: &Path, o: &Opts, progress: Progress) -> Result<Extracted, S
 }
 
 /// The rendered page as PNG bytes.
+/// One page as a JPEG for the page viewer (`page` 1-based, clamped), with the page count.
+pub fn render_page(lib: &Path, path: &Path, page: i64, width: u32) -> Result<(Vec<u8>, i64), String> {
+    let pdfium = bind(lib)?;
+    let doc = pdfium.load_pdf_from_file(path, None).map_err(|e| format!("{}: {e:?}", tr("A PDF nem nyitható meg", "The PDF could not be opened")))?;
+    let count = doc.pages().len() as i64;
+    if count == 0 {
+        return Err(tr("A PDF-ben nincs oldal.", "The PDF has no pages."));
+    }
+    let idx = (page.clamp(1, count) - 1) as u16;
+    let p = doc.pages().get(idx).map_err(|e| format!("{e:?}"))?;
+    let width = width.clamp(300, 3000) as i32;
+    let cfg = PdfRenderConfig::new().set_target_width(width).set_maximum_height(width * 3).render_form_data(true);
+    let bmp = p.render_with_config(&cfg).map_err(|e| format!("{e:?}"))?;
+    Ok((jpeg_of(&bmp)?, count))
+}
+
+fn jpeg_of(bmp: &PdfBitmap) -> Result<Vec<u8>, String> {
+    let w = bmp.width() as u32;
+    let h = bmp.height() as u32;
+    let raw = bmp.as_raw_bytes();
+    let stride = if h > 0 { raw.len() / h as usize } else { 0 };
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h as usize {
+        let row = &raw[y * stride..];
+        for x in 0..w as usize {
+            let p = &row[x * 4..x * 4 + 4];
+            let a = p[3] as u32;
+            // BGRA, transparent = white paper
+            for c in [p[2], p[1], p[0]] {
+                rgb.push(((c as u32 * a + 255 * (255 - a)) / 255) as u8);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+        .write_image(&rgb, w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 fn png_of(bmp: &PdfBitmap) -> Result<Vec<u8>, String> {
     let w = bmp.width() as u32;
     let h = bmp.height() as u32;
@@ -302,5 +342,19 @@ mod tests {
         let show = std::env::var("SKILLSTAR_SHOW_PAGE").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
         eprintln!("--- page {show} ---
 {}", x.pages.get(show - 1).map(|p| p.text.chars().take(900).collect::<String>()).unwrap_or_default());
+    }
+
+    #[test]
+    fn renders_a_page() {
+        let Ok(lib) = std::env::var("SKILLSTAR_PDFIUM") else { return };
+        let Ok(pdf) = std::env::var("SKILLSTAR_TEST_PDF") else { return };
+        let (jpg, pages) = render_page(Path::new(&lib), Path::new(&pdf), 3, 1000).unwrap();
+        assert!(pages >= 1);
+        assert_eq!(&jpg[..2], &[0xFF, 0xD8]);
+        // out of range pages are clamped
+        assert!(render_page(Path::new(&lib), Path::new(&pdf), 99_999, 400).is_ok());
+        if let Ok(out) = std::env::var("SKILLSTAR_PAGE_JPG") {
+            std::fs::write(out, &jpg).unwrap();
+        }
     }
 }
