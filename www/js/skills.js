@@ -98,8 +98,12 @@ export const VIEWS = [
 export function renderViewTabs(ctx) {
   const { S } = ctx;
   const el = document.getElementById('tabs');
-  if (!S.skillId) { el.replaceChildren(); el.classList.add('none'); return; }
   el.classList.remove('none');
+  // no skill yet: the Documents tab, where the first files start a new skill
+  if (!S.skillId) {
+    el.replaceChildren(h('div.tab.active', icon('pages'), h('span.name', t('Dokumentumok'))));
+    return;
+  }
   el.replaceChildren(...VIEWS.map(([id, label, ic]) => h('div.tab' + (S.view === id ? '.active' : ''), { on: { click: () => ctx.setView(id) } },
     icon(ic), h('span.name', t(label)),
     id === 'docs' && S.docs.length ? h('span.tab-count', String(S.docs.length)) : null)));
@@ -153,9 +157,6 @@ export function renderDocs(ctx, el) {
       : h('button.btn.primary', { disabled: !toProcess.length && !selDocs.length, title: t('Az új, hibás és megváltozott dokumentumok feldolgozása. Ha sorokat jelöltél ki (kattintás, Ctrl/Shift + kattintás), csak azokat dolgozza fel; a pipa nem kijelölés, hanem hogy bekerül-e a skillbe.'),
         on: { click: () => ctx.process(selDocs.length ? selDocs.map((d) => d.id) : toProcess.map((d) => d.id)) } },
       icon('play'), selDocs.length ? t('Kijelölt sorok feldolgozása ({0})', selDocs.length) : toProcess.some((d) => d.partial > 0) ? t('Folytatás ({0})', toProcess.length) : t('Feldolgozás ({0})', toProcess.length)),
-    selDocs.length ? h('span.sel-chip', { title: t('Sorok kijelölése: kattintás, Ctrl/Shift + kattintás. A pipa nem kijelölés: azt mutatja, hogy a dokumentum bekerül-e a skillbe.') },
-      t('{0} sor kijelölve', selDocs.length),
-      h('button.icon-btn', { title: t('Kijelölés megszüntetése (Esc)'), on: { click: () => { sel.clear(); ctx.renderContent(); } } }, icon('close'))) : null,
     h('span.grow'),
     selDocs.length ? h('button.btn', { on: { click: () => ctx.removeDocs(selDocs) } }, icon('trash'), t('Kijelölt sorok eltávolítása ({0})', selDocs.length)) : null,
     h('span.docs-sum', t('{0} dokumentum · {1} oldal · {2} kész', docs.length, docs.reduce((a, d) => a + d.pages, 0), docs.filter((d) => d.status === 'done').length)));
@@ -195,7 +196,8 @@ export function renderDocs(ctx, el) {
     d.use_when ? h('div.dn-use', d.use_when) : d.summary ? h('div.dn-use', d.summary) : null),
   h('td.c-pages', d.status === 'done' ? String(d.pages) : ''),
   h('td.c-src', textSource(d), d.ocr_mode !== 'auto' ? h('span.ocr-mode', { title: t('OCR mód') }, d.ocr_mode === 'force' ? t('mindig OCR') : t('OCR nélkül')) : null,
-    d.ocr_lang ? h('span.ocr-mode', { title: t('OCR nyelv') }, ocrLangLabel(ctx, d.ocr_lang)) : null),
+    d.ocr_lang ? h('span.ocr-mode', { title: t('OCR nyelv') }, ocrLangLabel(ctx, d.ocr_lang)) : null,
+    d.rag === false ? h('span.ocr-mode.rag-off', { title: t('A RAG kérdések nem keresnek ebben a dokumentumban (jobb klikk → Keresés a RAG kérdésekben)') }, t('RAG ki')) : null),
   h('td.c-size', fmtSize(d.size)),
   h('td.c-st', statusCell(ctx, d)),
   h('td.c-act', h('button.icon-btn', { title: t('Műveletek'), on: { click: (e) => docMenu(ctx, e, d) } }, icon('chev')))));
@@ -218,6 +220,11 @@ function docMenu(ctx, e, d) {
     '-',
     { label: many ? t('Kijelölt sorok feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },
     { label: many ? t('Újra OCR más nyelvvel ({0})…', sel.length) : t('Újra OCR más nyelvvel…'), icon: 'scan', disabled: !(many ? sel : [d]).some((x) => x.kind === 'pdf' || x.kind === 'image') || S.queue.includes(d.id), action: () => reOcrDlg(ctx, (many ? sel : [d]).filter((x) => x.kind === 'pdf' || x.kind === 'image')) },
+    { label: t('Keresés a RAG kérdésekben'), icon: d.rag !== false ? 'check' : null, action: async () => {
+      const on = d.rag === false;
+      try { for (const x of many ? sel : [d]) await invoke('set_document_rag', { id: x.id, on }); } catch (e2) { err(e2); }
+      ctx.reloadDocs();
+    } },
     { header: t('OCR mód') },
     ...[['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')], ['off', t('OCR nélkül')]].map(([m, l]) => (
       { label: l, icon: d.ocr_mode === m ? 'check' : null, action: async () => { for (const x of many ? sel : [d]) await ctx.saveDoc(x, { ocr_mode: m }, true); ctx.reloadDocs(); } })),

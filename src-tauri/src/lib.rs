@@ -117,6 +117,7 @@ pub fn run() {
             commands::add_documents,
             commands::remove_documents,
             commands::update_document,
+            commands::set_document_rag,
             commands::reorder_documents,
             commands::document_text,
             commands::save_page,

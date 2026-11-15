@@ -350,6 +350,9 @@ pub fn rag_queries_system() -> String {
      the passages that answer the user's question. Write 3 to 5 queries, one per line, each 2–6 words, no operators, \
      no quotes, no numbering, nothing else. Use the important terms, their base forms and synonyms, technical terms, \
      register names or numbers from the question, and translations (English ↔ Hungarian, German) where documents \
-     might use another language. If the question refers to the earlier conversation, resolve the reference."
+     might use another language. If the question refers to the earlier conversation, resolve the reference. \
+     Read the question in the domain of the collection: questions are often typed without accents and use the \
+     jargon of the field, so take a word in its meaning in that field (in a computer collection \"hires\" is the \
+     high-resolution graphics mode, not \"híres\"), and keep its original spelling in one of the queries."
         .to_string()
 }

@@ -133,6 +133,10 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     if !has("documents", "ocr_lang")? {
         c.execute_batch("ALTER TABLE documents ADD COLUMN ocr_lang TEXT NOT NULL DEFAULT ''")?;
     }
+    // searched by the RAG questions (the package uses `include`)
+    if !has("documents", "rag")? {
+        c.execute_batch("ALTER TABLE documents ADD COLUMN rag INTEGER NOT NULL DEFAULT 1")?;
+    }
     // chat_turns existed for a while without the web search results
     if !has("chat_turns", "web")? {
         c.execute_batch("ALTER TABLE chat_turns ADD COLUMN web TEXT NOT NULL DEFAULT '[]'")?;
@@ -296,6 +300,8 @@ pub struct Document {
     /// OCR engine + language of this document: "" = settings, "win:<tag>", "tess:<langs>"
     pub ocr_lang: String,
     pub include: bool,
+    /// searched by the RAG questions of the AI panel
+    pub rag: bool,
     pub added: i64,
     pub processed: i64,
     pub ord: i64,
@@ -307,7 +313,7 @@ pub struct Document {
 }
 
 const DOC_COLS: &str = "id, skill_id, path, name, kind, size, mtime, sha, status, error, pages, ocr_pages, chars, title, summary, use_when, ocr_mode, include, added, processed, ord,
-  (SELECT COUNT(*) FROM partial_pages pp WHERE pp.doc_id = documents.id), ocr_lang";
+  (SELECT COUNT(*) FROM partial_pages pp WHERE pp.doc_id = documents.id), ocr_lang, rag";
 
 fn doc_row(r: &rusqlite::Row) -> rusqlite::Result<Document> {
     Ok(Document {
@@ -336,6 +342,7 @@ fn doc_row(r: &rusqlite::Row) -> rusqlite::Result<Document> {
         missing: false,
         partial: r.get(21)?,
         ocr_lang: r.get(22)?,
+        rag: r.get::<_, i64>(23)? != 0,
     })
 }
 
@@ -634,9 +641,9 @@ pub fn fts_query(q: &str, any: bool) -> String {
 }
 
 pub fn search(c: &Connection, skill_id: i64, q: &str, limit: i64) -> Result<Vec<Hit>, String> {
-    let mut hits = run_search(c, skill_id, &fts_query(q, false), limit, true)?;
+    let mut hits = run_search(c, skill_id, &fts_query(q, false), limit, 1)?;
     if hits.is_empty() {
-        hits = run_search(c, skill_id, &fts_query(q, true), limit, true)?;
+        hits = run_search(c, skill_id, &fts_query(q, true), limit, 1)?;
     }
     Ok(hits)
 }
@@ -657,12 +664,18 @@ pub fn page_hit(c: &Connection, doc_id: i64, no: i64) -> Result<Option<Hit>, Str
     }
 }
 
-/// The RAG search: every document of the skill, also the ones left out of the package.
+/// The RAG search: every document of the skill that is on for RAG (also the ones left out of the package).
 pub fn search_expr(c: &Connection, skill_id: i64, expr: &str, limit: i64) -> Result<Vec<Hit>, String> {
-    run_search(c, skill_id, expr, limit, false)
+    run_search(c, skill_id, expr, limit, 2)
 }
 
-fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64, included_only: bool) -> Result<Vec<Hit>, String> {
+pub fn set_document_rag(c: &Connection, id: i64, on: bool) -> Result<(), String> {
+    c.execute("UPDATE documents SET rag=?2 WHERE id=?1", params![id, on as i64]).map_err(e)?;
+    Ok(())
+}
+
+/// `scope`: 0 every document, 1 the ones in the package, 2 the ones on for RAG.
+fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64, scope: i64) -> Result<Vec<Hit>, String> {
     if m.is_empty() {
         return Ok(vec![]);
     }
@@ -671,12 +684,12 @@ fn run_search(c: &Connection, skill_id: i64, m: &str, limit: i64, included_only:
             "SELECT f.doc_id, CASE WHEN d.title <> '' THEN d.title ELSE d.name END, f.no,
                     snippet(pages_fts, 0, '\u{1}', '\u{2}', ' … ', 24), f.text, d.skill_id, d.kind
              FROM pages_fts f JOIN documents d ON d.id = f.doc_id
-             WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND (?4 = 0 OR d.include = 1)
+             WHERE pages_fts MATCH ?1 AND (?2 = 0 OR d.skill_id = ?2) AND (?4 = 0 OR (?4 = 1 AND d.include = 1) OR (?4 = 2 AND d.rag = 1))
              ORDER BY bm25(pages_fts) LIMIT ?3",
         )
         .map_err(e)?;
     let rows = st
-        .query_map(params![m, skill_id, limit, included_only], |r| {
+        .query_map(params![m, skill_id, limit, scope], |r| {
             Ok(Hit { doc_id: r.get(0)?, doc: r.get(1)?, page: r.get(2)?, snippet: r.get(3)?, text: r.get(4)?, skill_id: r.get(5)?, kind: r.get(6)? })
         })
         .map_err(e)?;
