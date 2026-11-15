@@ -124,6 +124,10 @@ fn migrate(c: &Connection) -> rusqlite::Result<()> {
     if !has("documents", "ocr_lang")? {
         c.execute_batch("ALTER TABLE documents ADD COLUMN ocr_lang TEXT NOT NULL DEFAULT ''")?;
     }
+    // chat_turns existed for a while without the web search results
+    if !has("chat_turns", "web")? {
+        c.execute_batch("ALTER TABLE chat_turns ADD COLUMN web TEXT NOT NULL DEFAULT '[]'")?;
+    }
     Ok(())
 }
 

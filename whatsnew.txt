@@ -12,6 +12,14 @@ SkillStar - What's new
   (synonyms, inflected and other-language forms), the local full-text
   index finds the passages, and the answer cites them as [n] - click a
   citation or a source to open the page. One skill or every skill.
+- RAG sources open the original PDF page (or image) in a page viewer
+  with zoom and paging, next to the extracted text.
+- RAG chat history: conversations are saved per skill and can be
+  reopened, continued, renamed and deleted.
+- Optional web search in RAG mode (Anthropic API): web claims are cited
+  as [Wn] and the web pages are listed under the answer.
+- Every answer shows where it comes from: knowledge base, web, or other
+  (sentences without a citation, e.g. the AI's own knowledge).
 - OCR language per document (Windows OCR language or Tesseract
   languages), and "Re-OCR with another language" for one or more
   documents. When the Hungarian OCR language is missing, the dialog

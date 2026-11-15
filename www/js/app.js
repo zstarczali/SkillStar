@@ -541,7 +541,7 @@ function aiPanel(title, run, presets = [], extra = null, chat = null) {
     const draw = () => {
       const f = filter.value.trim().toLowerCase();
       const shown = list.filter((c) => !f || c.title.toLowerCase().includes(f));
-      rows.replaceChildren(...(shown.length ? shown.map((c) => h('div.ai-hist-row', { class: c.id === chatId ? 'on' : '', title: c.title, on: { click: () => open(c) } },
+      rows.replaceChildren(...(shown.length ? shown.map((c) => h('div.ai-hist-row' + (c.id === chatId ? '.on' : ''), { title: c.title, on: { click: () => open(c) } },
         h('span.tt', c.title),
         h('span.meta', t('{0} kérdés', c.turns), ' · ', relTime(c.updated)),
         h('button.icon-btn.sm', { title: t('Átnevezés'), on: { click: async (e) => {
@@ -606,6 +606,7 @@ function renderAnswer(body, res) {
   body.append(out);
   const mix = mixBar(res.text);
   if (mix) body.append(mix);
+  if (mix && res.sources?.length && !/\[\d+(?:\s*[,;]\s*\d+)*\]/.test(res.text)) body.append(h('div.mix-note', icon('info'), t('A dokumentumokban nem volt a kérdéshez illő részlet, ezért a válasz nem a tudásbázisból jött.')));
   if (res.sources?.length) body.append(sourceList(res));
   if (res.web?.length) body.append(webList(res));
   return out;
@@ -685,7 +686,7 @@ function mixBar(text) {
   ];
   return h('div.mix', { title: t('Honnan származik a válasz (a mondatok hossza alapján, a hivatkozások szerint)') },
     h('div.mix-bar', parts.filter(([k]) => p[k] > 0).map(([k, label]) => h('span.mix-' + k, { style: { width: p[k] + '%' }, title: `${label}: ${p[k]}%` }))),
-    h('div.mix-leg', parts.map(([k, label, tip]) => h('span.mix-l', { class: p[k] ? '' : 'zero', title: tip }, h('i.mix-' + k), label, h('b', p[k] + '%')))));
+    h('div.mix-leg', parts.map(([k, label, tip]) => h('span.mix-l' + (p[k] ? '' : '.zero'), { title: tip }, h('i.mix-' + k), label, h('b', p[k] + '%')))));
 }
 
 function webList(res) {
@@ -710,7 +711,9 @@ function sourceList(res) {
       h('button.btn.xs', { title: t('A kinyert szöveg ezen az oldalon'), on: { click: (e) => { e.stopPropagation(); openSource(s); } } }, icon('note'), t('Szöveg'))),
     h('span.x', s.text.replace(/\s+/g, ' ').slice(0, 160)));
   const more = rest.length ? h('details.src-more', h('summary', t('További {0} keresett részlet', rest.length)), rest.map(row)) : null;
-  return h('div.srcs', h('div.srcs-h', icon('pages'), t('Források')), used.length ? used.map(row) : null, used.length ? more : rest.map(row));
+  // nothing cited: the search found these, but the answer did not use them
+  if (!used.length) return h('details.srcs.unused', h('summary.srcs-h', icon('pages'), t('Keresett részletek ({0}) – a válasz egyiket sem használta', rest.length)), rest.map(row));
+  return h('div.srcs', h('div.srcs-h', icon('pages'), t('Források')), used.map(row), more);
 }
 
 /** Opens a cited page in the text view (switching skill if the source is in another one). */
@@ -731,7 +734,7 @@ function aiAsk(q) {
   const sw = (key, label, title, disabled = false) => {
     const e = h('input', { type: 'checkbox', checked: opt[key], disabled });
     e.addEventListener('change', () => { opt[key] = e.checked; uiSet('rag.' + key, e.checked); });
-    return h('label.chk.rag-opt', { title, class: disabled ? 'off' : '' }, e, label);
+    return h('label.chk.rag-opt' + (disabled ? '.off' : ''), { title }, e, label);
   };
   const extra = h('div.rag-opts',
     h('span.rag-badge', 'RAG'),

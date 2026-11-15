@@ -497,7 +497,7 @@ a.cite:hover { background: var(--accent); color: var(--accent-text, #fff); }
 .src .x { grid-column: 2 / span 2; color: var(--text-faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .src-more summary { padding: 5px 9px; border-top: 1px solid var(--border-soft); font-size: 11.5px; color: var(--text-dim); cursor: pointer; }
 /* RAG: where the answer comes from */
-.ai-panel { --mix-kb: var(--accent); --mix-web: #38bdf8; --mix-other: color-mix(in srgb, var(--text-faint) 55%, transparent); }
+.ai-panel { --mix-kb: var(--accent); --mix-web: #f59e0b; --mix-other: color-mix(in srgb, var(--text-faint) 55%, transparent); }
 [data-theme="ai"] .ai-panel { --mix-kb: var(--neon-c); --mix-web: var(--neon-m); --mix-other: #5b5f86; }
 .mix { margin: 6px 0 2px; }
 .mix-bar { display: flex; height: 7px; border-radius: 4px; overflow: hidden; background: var(--bg-3); gap: 2px; }
@@ -512,8 +512,15 @@ a.cite:hover { background: var(--accent); color: var(--accent-text, #fff); }
 .mix-l i { width: 9px; height: 9px; border-radius: 3px; }
 .mix-l b { color: var(--text); font-weight: 700; }
 .mix-l.zero { opacity: .45; }
+.mix-note { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11.5px; color: var(--warn); }
+.mix-note svg.i { width: 13px; height: 13px; flex: none; }
+.srcs.unused > summary { cursor: pointer; list-style: none; }
+.srcs.unused > summary::-webkit-details-marker { display: none; }
+.srcs.unused > summary::after { content: '▸'; margin-left: auto; }
+.srcs.unused[open] > summary::after { content: '▾'; }
 a.cite.web { background: color-mix(in srgb, var(--mix-web) 25%, transparent); }
-a.cite.web:hover { background: var(--mix-web); color: #04212b; }
+a.cite.web:hover { background: var(--mix-web); color: #1c1203; }
+.ai-presets[hidden] { display: none; }
 .src.web .n { background: color-mix(in srgb, var(--mix-web) 25%, transparent); font-size: 10px; }
 .rag-opt.off { opacity: .5; cursor: default; }
 /* RAG: conversation history */
