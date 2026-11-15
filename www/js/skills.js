@@ -5,6 +5,34 @@ import { invoke, h, icon, toast, modal, confirmDlg, contextMenu, relTime, fmtDat
 import { t } from './i18n.js';
 import { mdRender } from './markdown.js';
 
+/** Package formats: id, name, what it is for (a function: translated at render time). */
+export const FORMATS = () => [
+  ['claude', 'Claude', t('Claude Code plugin, .plugin, claude.ai / Desktop skill ZIP')],
+  ['agents', 'Agent Skills', t('OpenAI Codex, Gemini CLI, GitHub Copilot, Cursor…')],
+  ['chatgpt', 'ChatGPT', t('Custom GPT / Project: utasítás + ≤ 20 tudásfájl')],
+  ['gemini', 'Gemini', t('Gem: utasítás + ≤ 10 tudásfájl')],
+  ['deepseek', 'DeepSeek', t('rendszerprompt + kontextusnyi részek')],
+  ['rag', 'RAG', t('chunks.jsonl bármely LLM-hez és vektoradatbázishoz')],
+];
+const fmtSet = (sk) => new Set((sk?.formats || 'claude').split(',').map((x) => x.trim()).filter(Boolean));
+
+/** Chips to switch the package formats on and off; `onChange(set)` after every click (at least one stays on). */
+function formatChips(sk, onChange, compact = false) {
+  const set = fmtSet(sk);
+  const wrap = h('div.fmt-chips' + (compact ? '.compact' : ''));
+  const draw = () => wrap.replaceChildren(...FORMATS().map(([id, name, what]) => h('button.fmt-chip' + (set.has(id) ? '.on' : ''), {
+    type: 'button', title: what,
+    on: { click: () => {
+      if (set.has(id)) { if (set.size === 1) return; set.delete(id); } else set.add(id);
+      draw();
+      onChange(set);
+    } },
+  }, h('i.box', set.has(id) ? icon('check') : null), h('b', name), compact ? null : h('span', t(what)))));
+  draw();
+  return wrap;
+}
+const fmtString = (set) => FORMATS().map((f) => f[0]).filter((f) => set.has(f)).join(',');
+
 export const KIND_ICON = { pdf: 'pdf', docx: 'word', odt: 'word', pptx: 'slides', image: 'image', html: 'globe', md: 'note', txt: 'file' };
 export const DOC_FILTER = ['pdf', 'docx', 'docm', 'dotx', 'pptx', 'odt', 'html', 'htm', 'md', 'markdown', 'txt', 'text', 'csv', 'rst', 'json', 'xml', 'yaml', 'yml', 'png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
 
@@ -163,7 +191,8 @@ export function renderDocs(ctx, el) {
   h('td.c-name', h('div.dn', icon(KIND_ICON[d.kind] || 'file'), h('div.dn-t', h('div.dn-title', docTitle(d)), docTitle(d) !== d.name ? h('div.dn-file', d.name) : null)),
     d.use_when ? h('div.dn-use', d.use_when) : d.summary ? h('div.dn-use', d.summary) : null),
   h('td.c-pages', d.status === 'done' ? String(d.pages) : ''),
-  h('td.c-src', textSource(d), d.ocr_mode !== 'auto' ? h('span.ocr-mode', { title: t('OCR mód') }, d.ocr_mode === 'force' ? t('mindig OCR') : t('OCR nélkül')) : null),
+  h('td.c-src', textSource(d), d.ocr_mode !== 'auto' ? h('span.ocr-mode', { title: t('OCR mód') }, d.ocr_mode === 'force' ? t('mindig OCR') : t('OCR nélkül')) : null,
+    d.ocr_lang ? h('span.ocr-mode', { title: t('OCR nyelv') }, ocrLangLabel(ctx, d.ocr_lang)) : null),
   h('td.c-size', fmtSize(d.size)),
   h('td.c-st', statusCell(ctx, d)),
   h('td.c-act', h('button.icon-btn', { title: t('Műveletek'), on: { click: (e) => docMenu(ctx, e, d) } }, icon('chev')))));
@@ -185,6 +214,7 @@ function docMenu(ctx, e, d) {
     ctx.aiOn() ? { label: t('Leírás AI-val'), icon: 'sparkle', disabled: d.status !== 'done', action: () => ctx.aiDescribe(d) } : null,
     '-',
     { label: many ? t('Kijelöltek feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },
+    { label: many ? t('Újra OCR más nyelvvel ({0})…', sel.length) : t('Újra OCR más nyelvvel…'), icon: 'scan', disabled: !(many ? sel : [d]).some((x) => x.kind === 'pdf' || x.kind === 'image') || S.queue.includes(d.id), action: () => reOcrDlg(ctx, (many ? sel : [d]).filter((x) => x.kind === 'pdf' || x.kind === 'image')) },
     { header: t('OCR mód') },
     ...[['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')], ['off', t('OCR nélkül')]].map(([m, l]) => (
       { label: l, icon: d.ocr_mode === m ? 'check' : null, action: async () => { for (const x of many ? sel : [d]) await ctx.saveDoc(x, { ocr_mode: m }, true); ctx.reloadDocs(); } })),
@@ -209,6 +239,7 @@ export async function editDocDlg(ctx, d) {
   useWhen.value = d.use_when || '';
   const mode = h('select.inp', [['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')], ['off', t('OCR nélkül')]].map(([v, l]) => h('option', { value: v }, l)));
   mode.value = d.ocr_mode;
+  const lang = ocrLangSelect(ctx, d.ocr_lang || '');
   const inc = h('input', { type: 'checkbox', checked: d.include });
   const aiOut = h('span.note');
   const aiBtn = ctx.aiOn() ? h('button.btn.ai', { type: 'button', disabled: d.status !== 'done' || null, on: { click: async () => {
@@ -231,13 +262,69 @@ export async function editDocDlg(ctx, d) {
     h('label.field.full', h('span', t('Összefoglaló')), summary),
     h('label.field.full', h('span', t('Használd ha…')), useWhen, h('span.note', t('A SKILL.md dokumentumlistájába kerül: ez segít a modellnek eldönteni, melyik forrást nyissa meg.'))),
     h('label.field', h('span', t('OCR mód')), mode, h('span.note', t('Módosítás után dolgozd fel újra.'))),
-    h('label.chk', inc, t('Bekerül a skillbe')),
+    h('label.field', h('span', t('OCR nyelv')), lang, h('span.note', t('Csak ennél a dokumentumnál; az alapértelmezés a Beállítások → Szövegkinyerés.'))),
+    h('label.chk.full', inc, t('Bekerül a skillbe')),
     aiBtn ? h('div.field.full', h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, aiBtn, aiOut)) : null);
   const ok = await modal({ title: t('Dokumentum – {0}', d.name), body, wide: true, buttons: [{ label: t('Mégse'), value: false }, { label: t('Mentés'), value: true, primary: true }] });
   if (!ok) return;
-  const modeChanged = mode.value !== d.ocr_mode;
-  await ctx.saveDoc(d, { title: title.value, summary: summary.value, use_when: useWhen.value, ocr_mode: mode.value, include: inc.checked });
-  if (modeChanged && d.status === 'done' && await confirmDlg(t('OCR mód'), t('Feldolgozod újra a dokumentumot az új OCR móddal?'), t('Feldolgozás'))) ctx.process([d.id]);
+  const modeChanged = mode.value !== d.ocr_mode || lang.value !== (d.ocr_lang || '');
+  await ctx.saveDoc(d, { title: title.value, summary: summary.value, use_when: useWhen.value, ocr_mode: mode.value, ocr_lang: lang.value, include: inc.checked });
+  if (modeChanged && d.status === 'done' && d.ocr_mode !== 'off' && await confirmDlg(t('OCR'), t('Feldolgozod újra a dokumentumot az új OCR beállítással?'), t('Feldolgozás'))) ctx.process([d.id]);
+}
+
+/** Re-OCR with another language / mode: saves the choice on the documents and processes them again. */
+async function reOcrDlg(ctx, docs) {
+  if (!docs.length) return;
+  const d = docs[0];
+  const lang = ocrLangSelect(ctx, d.ocr_lang || '');
+  const mode = h('select.inp', [['auto', t('Automatikus (csak a szöveg nélküli oldalak)')], ['force', t('Mindig OCR (minden oldal)')]].map(([v, l]) => h('option', { value: v }, l)));
+  mode.value = d.ocr_mode === 'force' ? 'force' : 'auto';
+  const ocr = ctx.S.engine?.ocr || {};
+  const hasHu = (ocr.windows_langs || []).some((l) => /^hu/i.test(l.tag)) || (ocr.tesseract_langs || []).includes('hun');
+  const cmd = 'Add-WindowsCapability -Online -Name "Language.OCR~~~hu-HU~0.0.1.0"';
+  const huHelp = hasHu ? null : h('div.field.full.ocr-help',
+    h('b', icon('warnTri'), t('A magyar OCR nyelv nincs telepítve ezen a gépen.')),
+    h('span', t('Az angol OCR az ékezeteket rosszul olvassa (á → å, ő → ö, ű → ü). Telepítsd a magyar Windows OCR-t: Gépház → Idő és nyelv → Nyelv és régió → Nyelv hozzáadása → Magyar (az „Optikai karakterfelismerés” legyen bejelölve), vagy rendszergazdai PowerShellben:')),
+    h('div.ocr-cmd', h('code', cmd), h('button.icon-btn', { type: 'button', title: t('Másolás'), on: { click: () => navigator.clipboard.writeText(cmd).then(() => toast(t('Vágólapra másolva'), 'ok', 1200)) } }, icon('copy'))),
+    h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+      h('button.btn.sm', { type: 'button', on: { click: () => invoke('open_url', { url: 'ms-settings:regionlanguage' }).catch(err) } }, icon('open'), t('Nyelvi beállítások megnyitása')),
+      h('span.note', t('Telepítés után indítsd újra a SkillStart, és a nyelv megjelenik a listában. Tesseract esetén a hun nyelvi csomag kell.'))));
+  const body = h('div.settings-grid',
+    h('div.field.full.note', docs.length > 1 ? t('{0} dokumentum OCR-je készül újra.', docs.length) : d.title || d.name),
+    h('label.field', h('span', t('OCR nyelv')), lang),
+    h('label.field', h('span', t('OCR mód')), mode, h('span.note', t('Szkennelt könyvnél mindegy; a „Mindig OCR” a rossz szövegréteget is felülírja.'))),
+    huHelp,
+    h('div.field.full.note', t('A szerkesztett oldalszövegek (javítások) elvesznek; a leírás és a cím megmarad.')));
+  const ok = await modal({ title: t('Újra OCR'), body, wide: true, buttons: [{ label: t('Mégse'), value: false }, { label: t('Újra OCR'), value: true, primary: true }] });
+  if (!ok) return;
+  for (const x of docs) await ctx.saveDoc(x, { ocr_lang: lang.value, ocr_mode: mode.value }, true);
+  ctx.process(docs.map((x) => x.id));
+}
+
+/** Readable name of a document OCR language value ("win:hu-HU", "tess:hun+eng"). */
+export function ocrLangLabel(ctx, v) {
+  if (!v) return '';
+  if (v.startsWith('win:')) {
+    const tag = v.slice(4);
+    const l = (ctx.S.engine?.ocr?.windows_langs || []).find((x) => x.tag === tag);
+    return l ? l.name : tag;
+  }
+  return 'Tesseract ' + v.slice(5);
+}
+
+/** OCR language of one document: settings default, an installed Windows OCR language, or Tesseract languages. */
+function ocrLangSelect(ctx, value) {
+  const ocr = ctx.S.engine?.ocr || {};
+  const opts = [['', t('Alapértelmezett (Beállítások)')]];
+  const win = (ocr.windows_langs || []).map((l) => ['win:' + l.tag, `Windows OCR – ${l.name} (${l.tag})`]);
+  const tl = ocr.tesseract_langs || [];
+  const tess = ocr.tesseract ? [...new Set(['hun', 'eng', 'hun+eng', 'deu', 'eng+deu', ...tl.filter((x) => x !== 'osd')])]
+    .filter((x) => !tl.length || x.split('+').every((p) => tl.includes(p))).map((x) => ['tess:' + x, `Tesseract – ${x}`]) : [];
+  const all = [...opts, ...win, ...tess];
+  if (value && !all.some((o) => o[0] === value)) all.push([value, `${ocrLangLabel(ctx, value)} (${t('nincs telepítve')})`]);
+  const s = h('select.inp', all.map(([v, l]) => h('option', { value: v }, l)));
+  s.value = value;
+  return s;
 }
 
 // ───────────────────────── text ─────────────────────────
@@ -352,9 +439,11 @@ export function renderSkillForm(ctx, el) {
     const d = await invoke('plugin:dialog|open', { options: { directory: true, multiple: false, title: t('Kimeneti mappa') } }).catch(() => null);
     if (d) outDir.value = Array.isArray(d) ? d[0] : d;
   } } }, t('Tallózás…'));
+  let formats = fmtSet(sk);
   const save = async () => {
     const next = { ...sk };
     for (const k of Object.keys(f)) next[k] = f[k].value;
+    next.formats = fmtString(formats);
     try {
       const saved = await invoke('update_skill', { skill: next });
       Object.assign(sk, saved);
@@ -375,6 +464,8 @@ export function renderSkillForm(ctx, el) {
       h('label.field', h('span', t('Szerző')), inp('author', { placeholder: S.settings.author || '' })),
       h('label.field', h('span', t('A generált szövegek nyelve')), lang),
       h('div'),
+      h('div.field.full', h('span', t('Csomagformátumok')), formatChips(sk, (set) => { formats = set; }),
+        h('span.note', t('Minden bekapcsolt formátum a kimeneti mappa saját almappájába kerül (claude/, agents/, chatgpt/, gemini/, deepseek/, rag/).'))),
       h('label.field.full', h('span', t('További utasítások a modellnek')), area('instructions', 6, t('Pl. „Mindig a legfrissebb szabályzatot vedd alapul.” vagy „Kódot Kick Assembler szintaxissal adj.” – Markdown, a SKILL.md végére kerül.'))),
       h('label.field.full', h('span', t('Kimeneti mappa (csak ennél a skillnél)')), h('div', { style: { display: 'flex', gap: '6px' } }, outDir, browse))),
     h('div.form-foot', h('span.note', t('Létrehozva: {0} · módosítva: {1}', fmtDate(sk.created, true), relTime(sk.updated))), h('span.grow'),
@@ -392,22 +483,28 @@ export function renderBuild(ctx, el) {
   const raw = { on: S.pkRaw };
   const result = res ? h('div.pk-result',
     h('div.pk-ok', icon('check'), h('b', t('Kész a csomag')), h('span.sub', t('{0} dokumentum · {1} oldal · {2} kulcsszó', res.documents, res.pages, res.terms))),
-    h('div.pk-paths',
-      pathRow(t('Plugin mappa (Claude Code)'), res.dir, true),
-      pathRow(t('Plugin csomag (.plugin)'), res.plugin),
-      pathRow(t('Skill ZIP (claude.ai / Claude Desktop)'), res.skill_zip)),
+    h('div.pk-paths', pathRow(t('Kimeneti mappa'), res.dir, true), ...(res.outputs || []).map((o) => pathRow(o.label, o.path, o.dir))),
     res.warnings.length ? h('div.pk-warn', res.warnings.map((w) => h('div', icon('warnTri'), w))) : null) : null;
   el.replaceChildren(h('div.pk',
     h('div.pk-head',
       h('div', h('h2', icon('pkg'), t('Skill csomag')),
         h('div.sub', sk?.built ? t('Utoljára építve: {0}', fmtDate(sk.built, true)) : t('Még nem építetted meg.'))),
+      sk ? formatChips(sk, async (set) => {
+        try {
+          const saved = await invoke('update_skill', { skill: { ...sk, formats: fmtString(set) } });
+          Object.assign(sk, saved);
+          S.pkSel = '';
+          renderBuild(ctx, el);
+        } catch (e) { err(e); }
+      }, true) : null,
       h('span.grow'),
       h('button.btn', { on: { click: () => ctx.revealOut(S.skillId) } }, icon('folderOpen'), t('Kimeneti mappa')),
       h('button.btn.primary', { disabled: !sk?.done || null, on: { click: () => ctx.build() } }, icon('build'), t('Csomag építése'))),
     result,
     h('div.pk-body', fileList, viewer)));
   invoke('preview_skill', { id: S.skillId }).then((files) => {
-    let selPath = S.pkSel && files.some((f) => f.path === S.pkSel) ? S.pkSel : (files.find((f) => f.path.endsWith('SKILL.md')) || files[0])?.path;
+    let selPath = S.pkSel && files.some((f) => f.path === S.pkSel) ? S.pkSel
+      : (files.find((f) => f.path.endsWith('SKILL.md')) || files.find((f) => /instructions\.md$|system-prompt\.md$/.test(f.path)) || files[0])?.path;
     const show = () => {
       const f = files.find((x) => x.path === selPath);
       fileList.querySelectorAll('.pk-file').forEach((x) => x.classList.toggle('sel', x.dataset.p === selPath));
@@ -420,11 +517,21 @@ export function renderBuild(ctx, el) {
           h('button.icon-btn', { title: t('Másolás'), on: { click: () => navigator.clipboard.writeText(f.text).then(() => toast(t('Vágólapra másolva'), 'ok', 1200)) } }, icon('copy'))),
         md ? h('div.md-view.pk-md', { html: mdRender(f.text.length > 120000 ? f.text.slice(0, 120000) + '\n\n…' : f.text) }) : h('pre.pk-raw', f.text));
     };
-    const tree = files.map((f) => {
-      const depth = f.path.split('/').length - 1;
-      return h('div.pk-file', { 'data-p': f.path, style: { paddingLeft: (8 + depth * 12) + 'px' }, title: f.path, on: { click: () => { selPath = f.path; show(); } } },
-        icon(f.path.endsWith('.json') ? 'file' : f.path.endsWith('SKILL.md') ? 'skill' : 'note'), h('span', f.path.split('/').pop()), h('span.cnt', fmtSize(f.size)));
-    });
+    // folders as their own rows: claude/, chatgpt/knowledge/ …
+    const tree = [];
+    let open = [];
+    for (const f of files) {
+      const parts = f.path.split('/');
+      const dirs = parts.slice(0, -1);
+      let same = 0;
+      while (same < open.length && same < dirs.length && open[same] === dirs[same]) same++;
+      for (let i = same; i < dirs.length; i++) {
+        tree.push(h('div.pk-dir', { style: { paddingLeft: (8 + i * 12) + 'px' }, title: dirs.slice(0, i + 1).join('/') }, icon('folder'), h('span', dirs[i] + '/')));
+      }
+      open = dirs;
+      tree.push(h('div.pk-file', { 'data-p': f.path, style: { paddingLeft: (8 + dirs.length * 12) + 'px' }, title: f.path, on: { click: () => { selPath = f.path; show(); } } },
+        icon(/\.jsonl?$/.test(f.path) ? 'file' : f.path.endsWith('SKILL.md') ? 'skill' : 'note'), h('span', parts[parts.length - 1]), h('span.cnt', fmtSize(f.size))));
+    }
     fileList.replaceChildren(h('div.pane-h', icon('folder'), sk?.name || ''), h('div.pk-tree', tree));
     show();
   }).catch((e) => {

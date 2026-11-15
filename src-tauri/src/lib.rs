@@ -7,6 +7,7 @@ mod extract;
 mod ocr;
 mod pdf;
 mod process;
+mod rag;
 mod settings;
 mod skill;
 mod update;

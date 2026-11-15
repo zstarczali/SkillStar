@@ -4,8 +4,11 @@ SkillStar - What's new
 0.1.0
 -----
 - First version: turns a pile of DOCX, PDF, PPTX, ODT, HTML, Markdown
-  and text files into a Claude skill package (Claude Code plugin folder,
-  .plugin file and a claude.ai skill ZIP).
+  and text files into skill packages. Formats, chosen per skill:
+  Claude (Claude Code plugin folder, .plugin file, claude.ai skill ZIP),
+  Agent Skills (Codex, Gemini CLI, Copilot, Cursor), ChatGPT (Custom
+  GPT / Project), Gemini Gem, DeepSeek and RAG (chunks.jsonl for any
+  LLM and vector store).
 - PDFs through PDFium (text layer, bookmarks as table of contents);
   pages without usable text are read with OCR: built-in Windows OCR or
   Tesseract. OCR mode per document (auto / always / never).
@@ -17,6 +20,8 @@ SkillStar - What's new
 - Generated SKILL.md, document index with table of contents, keyword
   index and per-document descriptions; package preview before building.
 - Optional AI (off by default): document titles / descriptions, skill
-  description, and questions answered from the documents.
-- Drag and drop files and folders, GitStar themes, Hungarian / English
-  UI, self-update.
+  description, and RAG questions: the AI writes extra search queries,
+  the local full-text index finds the passages, and the answer cites
+  them as [n] - click to open the page. One skill or every skill.
+- Drag and drop files and folders, GitStar themes (the AI theme is
+  now "Neon"), Hungarian / English UI, self-update.

@@ -99,12 +99,18 @@ language with its optical character recognition feature), elsewhere, or
 if you prefer it, with Tesseract (install it and set it in Settings >
 Extraction). An interrupted OCR run continues where it stopped.
 
-Using the package
------------------
-SkillStar writes three things for every skill:
-- a folder with the Claude Code plugin (.claude-plugin/plugin.json,
-  skills/<name>/SKILL.md, knowledge/...): copy the skill folder into
-  ~/.claude/skills, or add the plugin folder;
-- <name>.plugin: the same plugin as one file;
-- <name>-skill.zip: upload it at claude.ai > Settings > Capabilities >
-  Skills.
+Using the packages
+------------------
+Choose the formats on the skill page or above the package preview.
+Every format goes into its own folder of the output folder, each with
+a README.md that explains the steps:
+- claude/: Claude Code plugin folder, <name>.plugin and
+  <name>-skill.zip (claude.ai > Settings > Capabilities > Skills);
+- agents/: Agent Skills folder + ZIP (OpenAI Codex, Gemini CLI, GitHub
+  Copilot, Cursor);
+- chatgpt/: instructions.md + knowledge files for a Custom GPT or a
+  ChatGPT Project;
+- gemini/: instructions.md + knowledge files for a Gem;
+- deepseek/: system prompt + the text cut into context-sized parts;
+- rag/: chunks.jsonl, documents.json and a system prompt for any LLM
+  and vector store.

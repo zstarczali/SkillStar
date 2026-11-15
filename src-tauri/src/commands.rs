@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::settings::{tr, Settings, SettingsStore};
-use crate::{ai, ocr, pdf, process, skill};
+use crate::{ai, ocr, pdf, process, rag, skill};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,23 @@ impl AppState {
 
 pub fn ocr_cfg(s: &Settings) -> ocr::OcrCfg {
     ocr::OcrCfg { engine: s.ocr_engine.clone(), lang: s.ocr_lang.clone(), tesseract: s.tesseract_path.clone(), tesseract_lang: s.tesseract_lang.clone() }
+}
+
+/// OCR settings of one document: its own engine + language ("win:<tag>" / "tess:<langs>") over the global ones.
+/// OCR switched off in the settings stays off.
+pub fn ocr_cfg_doc(s: &Settings, doc_lang: &str) -> ocr::OcrCfg {
+    let mut c = ocr_cfg(s);
+    if c.engine == "off" {
+        return c;
+    }
+    if let Some(tag) = doc_lang.strip_prefix("win:").filter(|t| !t.trim().is_empty()) {
+        c.engine = "windows".into();
+        c.lang = tag.trim().to_string();
+    } else if let Some(langs) = doc_lang.strip_prefix("tess:").filter(|t| !t.trim().is_empty()) {
+        c.engine = "tesseract".into();
+        c.tesseract_lang = langs.trim().to_string();
+    }
+    c
 }
 
 async fn blocking<T, F>(f: F) -> Result<T, String>
@@ -186,14 +203,16 @@ pub fn remove_documents(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(),
 }
 
 #[tauri::command]
-pub fn update_document(state: State<'_, AppState>, id: i64, title: String, summary: String, use_when: String, ocr_mode: String, include: bool) -> Result<db::Document, String> {
+pub fn update_document(state: State<'_, AppState>, id: i64, title: String, summary: String, use_when: String, ocr_mode: String, ocr_lang: Option<String>, include: bool) -> Result<db::Document, String> {
     let mode = if matches!(ocr_mode.as_str(), "auto" | "force" | "off") { ocr_mode } else { "auto".into() };
     state.with_db(|c| {
-        // pages of an interrupted run were made with the old OCR mode
-        if db::document(c, id)?.ocr_mode != mode {
+        let old = db::document(c, id)?;
+        let lang = ocr_lang.unwrap_or_else(|| old.ocr_lang.clone());
+        // pages of an interrupted run were made with the old OCR mode / language
+        if old.ocr_mode != mode || old.ocr_lang != lang {
             db::clear_partial(c, id)?;
         }
-        db::update_document_meta(c, id, &title, &summary, &use_when, &mode, include)?;
+        db::update_document_meta(c, id, &title, &summary, &use_when, &mode, &lang, include)?;
         db::document(c, id)
     })
 }
@@ -281,6 +300,7 @@ pub fn preview_skill(state: State<'_, AppState>, id: i64) -> Result<Vec<PreviewF
         .files
         .into_iter()
         .map(|(path, text)| {
+            let text = text.to_string();
             let size = text.len();
             // big sources are shown only in part
             let text = if size > 200_000 {
@@ -390,7 +410,9 @@ pub fn open_file(path: String) -> Result<(), String> {
 /// Opens a web page in the default browser (http(s) only).
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(|c| c.is_whitespace() || c == '"') {
+    // the only non-web address: the Windows language settings (installing an OCR language)
+    let settings_page = url == "ms-settings:regionlanguage";
+    if !(settings_page || url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(|c| c.is_whitespace() || c == '"') {
         return Err(tr("Érvénytelen webcím.", "Invalid web address."));
     }
     #[cfg(windows)]
@@ -407,12 +429,6 @@ pub fn exe_path() -> String {
 }
 
 // ───────────────────────────── AI ─────────────────────────────
-
-#[derive(Serialize)]
-pub struct AiResult {
-    pub text: String,
-    pub truncated: bool,
-}
 
 /// Earlier questions and answers of the AI panel, for follow-up questions.
 #[derive(serde::Deserialize, Default)]
@@ -558,34 +574,78 @@ pub async fn ai_skill_description(state: State<'_, AppState>, id: i64) -> Result
     Ok(text.trim().trim_matches('"').to_string())
 }
 
-/// AI: answers a question from the knowledge base (search + answer with citations).
+#[derive(Serialize)]
+pub struct AskResult {
+    pub text: String,
+    /// the passages the answer could cite ([n] = passages[n-1])
+    pub sources: Vec<rag::Passage>,
+    /// the search queries used (the question first)
+    pub queries: Vec<String>,
+}
+
+/// AI in RAG mode: (AI-written extra search queries) → local full-text retrieval
+/// → numbered passages → answer with [n] citations. `all`: every skill.
 #[tauri::command]
-pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>) -> Result<AiResult, String> {
+pub async fn ai_ask(state: State<'_, AppState>, id: i64, question: String, history: Option<Vec<Turn>>, all: Option<bool>, expand: Option<bool>) -> Result<AskResult, String> {
     let cfg = state.settings.get();
     ai_check(&cfg)?;
-    if question.trim().is_empty() {
+    let question = question.trim().to_string();
+    if question.is_empty() {
         return Err(tr("Írj be egy kérdést.", "Type a question."));
     }
-    let hits = state.with_db(|c| db::search(c, id, &question, 12))?;
-    let mut ctx = String::from("<hits>\n");
-    let mut seen = std::collections::HashSet::new();
-    let mut size = 0;
-    for h in &hits {
-        if !seen.insert((h.doc_id, h.page)) || size > 90_000 {
-            continue;
+    let history = history.unwrap_or_default();
+    let recent: Vec<&Turn> = history.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let mut queries = vec![question.clone()];
+    if expand.unwrap_or(true) {
+        let mut user = String::new();
+        for t in &recent {
+            user.push_str(&format!("Earlier question: {}\n", t.q));
         }
-        let t: String = h.text.chars().take(8000).collect();
-        size += t.len();
-        ctx.push_str(&format!("<hit document=\"{}\" page=\"{}\">\n{}\n</hit>\n", h.doc.replace('"', "'"), h.page, t));
+        user.push_str(&format!("Question: {question}"));
+        // a failing rewrite only costs recall, the question itself is still searched
+        if let Ok(text) = ai::complete(ai::AiRequest {
+            provider: &cfg.ai_provider,
+            api_key: cfg.ai_key(),
+            model: cfg.ai_model_id(),
+            system: ai::rag_queries_system(),
+            user,
+            effort: "low",
+            max_tokens: 400,
+        })
+        .await
+        {
+            for q in rag::parse_queries(&text, 5) {
+                if !queries.iter().any(|x| x.eq_ignore_ascii_case(&q)) {
+                    queries.push(q);
+                }
+            }
+        }
     }
-    ctx.push_str("</hits>\n");
-    let mut user = ctx;
-    for t in history.unwrap_or_default() {
-        user.push_str(&format!("\nEarlier question: {}\nYour earlier answer:\n{}\n", t.q, t.a));
+    let skill = if all.unwrap_or(false) { 0 } else { id };
+    let qs = queries.clone();
+    let sources = state.with_db(|c| rag::retrieve(c, skill, &qs, 14, 60_000))?;
+    if sources.is_empty() {
+        return Ok(AskResult {
+            text: tr(
+                "A keresés nem talált a kérdéshez illő oldalt a dokumentumokban. Próbáld más szavakkal, vagy kapcsold be a „Keresés bővítése AI-val” lehetőséget.",
+                "The search found no page that fits the question. Try other words, or turn on “Expand the search with AI”.",
+            ),
+            sources,
+            queries,
+        });
+    }
+    let mut user = rag::context(&sources);
+    if !recent.is_empty() {
+        user.push_str("\n<conversation>\n");
+        for t in &recent {
+            let a: String = t.a.chars().take(2500).collect();
+            user.push_str(&format!("Question: {}\nAnswer: {}\n\n", t.q, a));
+        }
+        user.push_str("</conversation>\n");
     }
     user.push_str(&format!("\nQuestion: {question}"));
     let text = ai_run(&cfg, ai::ask_system(&cfg.ai_language), user, 8000).await?;
-    Ok(AiResult { text, truncated: hits.is_empty() })
+    Ok(AskResult { text, sources, queries })
 }
 
 /// Settings → AI → Test: a tiny request with the values typed in the dialog.

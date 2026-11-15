@@ -43,12 +43,16 @@ Current version **0.1.0**. See [What's new](whatsnew.txt) for the release histor
 - **OCR** for pages without a usable text layer — the built-in **Windows OCR** (no install) or **Tesseract**. Per document: automatic, always or never. Every finished page is saved at once, so **a stopped or interrupted run continues where it left off**.
 - **Local database** — SQLite with **FTS5 full-text search** over every page (accent-insensitive), snippets, a hit opens the page.
 - **Text viewer** — Page by page with the outline; the page text can be edited to fix OCR errors.
-- **Package** — Preview of every generated file, then **Build**:
-  - a **Claude Code plugin** folder (`.claude-plugin/plugin.json`, `skills/<name>/SKILL.md`, `knowledge/index.md`, `knowledge/DOCUMENTS.md`, `knowledge/sources/*.md` with `--- PAGE n ---` markers),
-  - the same plugin as a single **`<name>.plugin`** file,
-  - **`<name>-skill.zip`** to upload at **claude.ai → Settings → Capabilities → Skills**.
-- **Optional AI** (off by default, **Settings → AI**) — titles and "when to use" descriptions of the documents, the skill description, and questions answered from the documents with page references. Only the needed text is sent, and only when you ask.
-- **Themes** — Dark, light, AI neon, retro, modern, modern dark, or system, as in GitStar. Zoom with Ctrl + / Ctrl − / Ctrl 0.
+- **Package formats** — chosen per skill, each into its own folder of the output (`<out>/<name>/`), with a preview of every file:
+  - **Claude** — Claude Code plugin folder (`.claude-plugin/plugin.json`, `skills/<name>/SKILL.md`, `knowledge/index.md`, `knowledge/DOCUMENTS.md`, `knowledge/sources/*.md` with `--- PAGE n ---` markers), the same as one **`.plugin`** file, and **`<name>-skill.zip`** for **claude.ai → Settings → Capabilities → Skills**.
+  - **Agent Skills** — the open `SKILL.md` format for other coding agents (OpenAI Codex, Gemini CLI, GitHub Copilot, Cursor…), folder + ZIP.
+  - **ChatGPT** — Custom GPT / Project: `instructions.md` (≤ 8000 characters) and at most 20 knowledge files (documents merged when needed) with a catalog.
+  - **Gemini** — Gem: instructions and at most 10 knowledge files.
+  - **DeepSeek** — system prompt and the text cut into context-sized parts, with a catalog of which pages are in which part.
+  - **RAG** — `chunks.jsonl` (page-aligned chunks with document, page and OCR flag), `documents.json` and a system prompt, for any LLM and vector store.
+- **Ask the documents (RAG)** (with AI on) — the question, plus search queries the AI writes (synonyms, inflected and other-language forms), go through the local full-text index; the best passages are fused, numbered and sent to the model, and the answer cites them as **[n]**: click a citation or a source to open the page. Search one skill or every skill.
+- **Optional AI** (off by default, **Settings → AI**) — titles and "when to use" descriptions of the documents, the skill description, and the RAG questions above. Only the needed text is sent, and only when you ask.
+- **Themes** — Dark, light, neon, retro, modern, modern dark, or system, as in GitStar. Zoom with Ctrl + / Ctrl − / Ctrl 0.
 - **Self-update** — Looks for a newer installer in `downloads/SkillStar/` on the update server (default `https://www.c64va.pro/`).
 - **English and Hungarian** interface.
 
@@ -79,10 +83,16 @@ The `.github/workflows/build.yml` workflow runs **only when manually triggered**
 
 Windows OCR uses the OCR languages installed in Windows: **Settings → Time & language → Language & region → add a language** (with *optical character recognition*). Choose the language in **Settings → Extraction**; *automatic* uses the user profile languages. For Tesseract, install it (with the `hun`, `eng`… traineddata), then set its path and languages (e.g. `hun+eng`) there.
 
-## Using the package
+## Using the packages
 
-- **Claude Code** — copy `skills/<name>` (with `knowledge/`) into `~/.claude/skills/`, or install the plugin folder / `.plugin` file.
-- **claude.ai** — upload `<name>-skill.zip` at **Settings → Capabilities → Skills**.
+Every format folder has its own `README.md` with the steps. In short:
+
+- **Claude Code** — `claude --plugin-dir <out>/<name>/claude/<name>`, or install `claude/<name>.plugin`.
+- **claude.ai / Claude Desktop** — upload `claude/<name>-skill.zip` at **Settings → Capabilities → Skills**.
+- **Agent Skills** — copy `agents/<name>/` into the skills folder of the tool.
+- **ChatGPT / Gemini** — paste `instructions.md` into the GPT / Gem and upload the files of `knowledge/`.
+- **DeepSeek** — paste `system-prompt.md`, attach `00-catalog.md` and the parts you need.
+- **RAG** — index `rag/chunks.jsonl` and use `rag/system-prompt.md`.
 
 ## AI setup
 
@@ -111,7 +121,8 @@ src-tauri/src/
   pdf.rs        PDFium: text layer, bookmarks, page rendering for OCR, download
   ocr.rs        Windows.Media.Ocr and Tesseract
   process.rs    Background processing queue with progress events
-  skill.rs      Package generation: SKILL.md, index, keyword index, plugin, ZIPs
+  skill.rs      Package formats: Claude, Agent Skills, ChatGPT, Gemini, DeepSeek, RAG
+  rag.rs        RAG retrieval: query terms, FTS5, rank fusion, best passage per page
   ai.rs         AI API calls and prompts (claude_cli.rs: Claude Code CLI)
   commands.rs   Tauri commands
   update.rs     Self-update

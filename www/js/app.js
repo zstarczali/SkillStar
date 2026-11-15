@@ -279,9 +279,9 @@ async function removeDocs(docs) {
 }
 
 async function saveDoc(d, patch, quiet = false) {
-  const n = { title: d.title, summary: d.summary, use_when: d.use_when, ocr_mode: d.ocr_mode, include: d.include, ...patch };
+  const n = { title: d.title, summary: d.summary, use_when: d.use_when, ocr_mode: d.ocr_mode, ocr_lang: d.ocr_lang || '', include: d.include, ...patch };
   try {
-    const saved = await invoke('update_document', { id: d.id, title: n.title, summary: n.summary, useWhen: n.use_when, ocrMode: n.ocr_mode, include: n.include });
+    const saved = await invoke('update_document', { id: d.id, title: n.title, summary: n.summary, useWhen: n.use_when, ocrMode: n.ocr_mode, ocrLang: n.ocr_lang, include: n.include });
     Object.assign(d, saved);
     if (!quiet) { renderContent(); renderViewTabs(ctx); }
   } catch (e) { err(e); }
@@ -393,8 +393,9 @@ function renderToolbar() {
   const running = S.queue.length > 0;
   const toProcess = S.docs.filter((d) => d.status === 'new' || d.status === 'error' || d.stale);
   el.replaceChildren(
-    h('div.repo-title', h('span.rn', sk ? sk.title : 'SkillStar'),
-      h('span.rb', icon(sk ? 'skill' : 'star'), sk ? sk.name : t('Dokumentumokból skill'))),
+    h('div.repo-title', { title: sk ? `${sk.title}
+${sk.name}` : '' }, h('span.rn', sk ? sk.title : 'SkillStar'),
+      h('span.rb', icon(sk ? 'skill' : 'star'), h('span.rbt', sk ? sk.name : t('Dokumentumokból skill')))),
     h('div.tb-sep'),
     tb(t('Új skill'), 'newSkill', () => newSkill(), { title: t('Új skill (Ctrl+N)') }),
     tb(t('Fájlok'), 'addFiles', () => addFiles(), { title: t('Dokumentumok hozzáadása (Ctrl+O)') }),
@@ -467,7 +468,7 @@ function renderWelcome(el) {
 
 // ───────────────────────── AI panel ─────────────────────────
 
-function aiPanel(title, run, presets = []) {
+function aiPanel(title, run, presets = [], extra = null) {
   document.querySelector('.ai-panel')?.remove();
   if (!aiOn()) { toast(t('Az AI funkciók ki vannak kapcsolva (Beállítások → AI).'), 'err'); return null; }
   if (!aiKey()) {
@@ -494,14 +495,18 @@ function aiPanel(title, run, presets = []) {
       wait.remove();
       history.push({ q, a: res.text });
       const out = h('div.ai-ans', { html: mdRender(res.text) });
+      if (res.sources) citeLinks(out, res.sources);
       out.addEventListener('click', (e) => {
+        const c = e.target.closest('a.cite');
+        if (c) { e.preventDefault(); openSource(res.sources[Number(c.dataset.n) - 1]); return; }
         const a = e.target.closest('a[href]');
         if (!a) return;
         e.preventDefault();
         if (/^(https?|mailto):/i.test(a.getAttribute('href'))) invoke('open_url', { url: a.getAttribute('href') }).catch(err);
       });
+      if (res.queries?.length > 1) body.append(h('div.rag-q', icon('search'), t('Keresések:'), ...res.queries.map((x) => h('span', x))));
       body.append(out);
-      if (res.truncated) body.append(h('div.ai-q', t('Megjegyzés: a keresés nem talált releváns oldalt – próbálj más szavakat.')));
+      if (res.sources?.length) body.append(sourceList(res));
       out.scrollIntoView({ block: 'start' });
     } catch (e) {
       wait.replaceWith(h('div', { style: { color: 'var(--danger)' } }, String(e)));
@@ -513,18 +518,73 @@ function aiPanel(title, run, presets = []) {
       h('button.icon-btn', { title: t('Szöveg másolása'), on: { click: () => navigator.clipboard.writeText(body.innerText).then(() => toast(t('Vágólapra másolva'), 'ok', 1500)) } }, icon('copy')),
       h('button.icon-btn', { title: t('Bezárás (Esc)'), on: { click: () => panel.remove() } }, icon('close'))),
     body,
-    h('div.ai-foot',
+    h('div.ai-foot', extra,
       presets.length ? h('div.ai-presets', presets.map((p) => h('button.btn.sm', { on: { click: () => ask(p) } }, p))) : null,
       h('div.ai-askrow', input, send)));
   document.body.append(panel);
   return { ask, input };
 }
 
+// ───────────────────────── RAG answers: [n] citations → sources ─────────────────────────
+
+/** [1], [2][4], [1, 3] in the answer → clickable citation marks (outside code). */
+function citeLinks(root, sources) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (n) => (n.parentElement.closest('code, pre, a') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+  const nodes = [];
+  while (walker.nextNode()) if (/\[\d+(?:\s*[,;]\s*\d+)*\]/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+  for (const n of nodes) {
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    const txt = n.nodeValue;
+    txt.replace(/\[(\d+(?:\s*[,;]\s*\d+)*)\]/g, (m, list, at) => {
+      frag.append(txt.slice(last, at));
+      for (const num of list.split(/[,;]/).map((x) => Number(x.trim()))) {
+        const s = sources[num - 1];
+        frag.append(s ? h('a.cite', { href: '#', 'data-n': String(num), title: `${s.doc} – ${t('{0}. oldal', s.page)}` }, String(num)) : `[${num}]`);
+      }
+      last = at + m.length;
+      return m;
+    });
+    frag.append(txt.slice(last));
+    n.replaceWith(frag);
+  }
+}
+
+function sourceList(res) {
+  const cited = new Set([...res.text.matchAll(/\[(\d+(?:\s*[,;]\s*\d+)*)\]/g)].flatMap((m) => m[1].split(/[,;]/).map((x) => Number(x.trim()))));
+  const used = res.sources.filter((s) => cited.has(s.n));
+  const rest = res.sources.filter((s) => !cited.has(s.n));
+  const row = (s) => h('div.src', { title: s.text.slice(0, 600), on: { click: () => openSource(s) } },
+    h('span.n', String(s.n)), h('span.d', s.doc), h('span.p', t('{0}. oldal', s.page)), h('span.x', s.text.replace(/\s+/g, ' ').slice(0, 160)));
+  const more = rest.length ? h('details.src-more', h('summary', t('További {0} keresett részlet', rest.length)), rest.map(row)) : null;
+  return h('div.srcs', h('div.srcs-h', icon('pages'), t('Források')), used.length ? used.map(row) : null, used.length ? more : rest.map(row));
+}
+
+/** Opens a cited page in the text view (switching skill if the source is in another one). */
+async function openSource(s) {
+  if (!s) return;
+  if (s.skill_id && s.skill_id !== S.skillId) await selectSkill(s.skill_id);
+  S.textDoc = s.doc_id;
+  S.textPage = s.page;
+  S.textFind = '';
+  setView('text');
+}
+
 function aiAsk(q) {
   const sk = curSkill();
   if (!sk) return;
-  const p = aiPanel(t('AI – {0}', sk.title), (question, history) => invoke('ai_ask', { id: sk.id, question, history }),
-    [t('Miről szólnak ezek a dokumentumok?'), t('Milyen kérdésekre tud válaszolni ez a skill?')]);
+  const opt = { all: !!uiGet('rag.all'), expand: uiGet('rag.expand') !== false };
+  const sw = (key, label, title) => {
+    const e = h('input', { type: 'checkbox', checked: opt[key] });
+    e.addEventListener('change', () => { opt[key] = e.checked; uiSet('rag.' + key, e.checked); });
+    return h('label.chk.rag-opt', { title }, e, label);
+  };
+  const extra = h('div.rag-opts',
+    h('span.rag-badge', 'RAG'),
+    sw('expand', t('Keresés bővítése AI-val'), t('Az AI előbb keresőkifejezéseket ír (szinonimák, ragozott és idegen nyelvű alakok), így több releváns oldalt talál; +1 rövid AI-hívás')),
+    S.skills.length > 1 ? sw('all', t('Minden skillben'), t('A keresés az összes skill dokumentumaiban')) : null);
+  const p = aiPanel(t('AI – {0}', sk.title), (question, history) => invoke('ai_ask', { id: sk.id, question, history, all: opt.all, expand: opt.expand }),
+    [t('Miről szólnak ezek a dokumentumok?'), t('Milyen kérdésekre tud válaszolni ez a skill?')], extra);
   if (!p) return;
   if (q) p.ask(q); else p.input.focus();
 }
@@ -738,7 +798,7 @@ async function settingsDlg(startTab) {
     ['look', t('Megjelenés'), h('div.settings-grid',
       fld('ui_language', t('Felület nyelve'), sel([['auto', t('Automatikus (rendszer)')], ['hu', 'Magyar'], ['en', 'English']], s.ui_language || 'auto')),
       h('div'),
-      fld('theme', t('Téma'), sel([['dark', t('Sötét')], ['light', t('Világos')], ['ai', 'AI (neon)'], ['retro', t('Retró (8 bites)')], ['modern', t('Modern (üveg)')], ['modern-dark', t('Modern sötét (üveg)')], ['system', t('Rendszer szerint')]], s.theme)),
+      fld('theme', t('Téma'), sel([['dark', t('Sötét')], ['light', t('Világos')], ['ai', 'Neon'], ['retro', t('Retró (8 bites)')], ['modern', t('Modern (üveg)')], ['modern-dark', t('Modern sötét (üveg)')], ['system', t('Rendszer szerint')]], s.theme)),
       fld('font_size', t('Felület betűmérete'), h('input.inp', { type: 'number', min: 10, max: 20, value: s.font_size })),
       fld('zoom', t('Nagyítás'), sel(ZOOMS.map((z) => [String(z), Math.round(z * 100) + '%']), String(ZOOMS.includes(zoomNow()) ? zoomNow() : 1)),
         t('Gyorsan: Ctrl + / Ctrl − / Ctrl 0, vagy Ctrl + egérgörgő.')))],
