@@ -123,6 +123,8 @@ pub fn run() {
             commands::add_documents,
             commands::web_import,
             commands::web_cancel,
+            commands::web_info,
+            commands::web_resume,
             commands::remove_documents,
             commands::update_document,
             commands::set_document_rag,

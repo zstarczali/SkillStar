@@ -1,6 +1,6 @@
 {
   "name": "skillstar",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "SkillStar - turns DOCX, PDF and other documents into Claude skill packages, with local OCR and a local database (Tauri 2 + Rust)",
   "scripts": {

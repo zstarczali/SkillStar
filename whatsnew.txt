@@ -1,6 +1,16 @@
 SkillStar - What's new
 ======================
 
+1.2.1
+-----
+- Continue a website download: the download is saved after every page,
+  and a stopped or unfinished one goes on from where it stopped
+  (right-click the website document -> Continue the download). The new
+  pages go into the same document, which is then processed again; you
+  can raise the number of pages too.
+- Stopping a download that waits for a server that does not answer is
+  quicker, and the page it waited for is tried again next time.
+
 1.2.0
 -----
 - E-books: EPUB (2 and 3, chapters and the table of contents of the

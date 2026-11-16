@@ -33,7 +33,7 @@
 
 SkillStar turns a pile of **DOCX, PDF, PPTX, ODT, HTML, Markdown and text files** — scanned PDFs too, through **OCR** — into a **Claude skill package**: the full text of every document, page by page, with an index, tables of contents and a keyword index, plus a `SKILL.md` that tells Claude how to search it and cite the sources. Tauri 2 and Rust backend, local SQLite database, no server. It is the sibling of [GitStar](https://github.com/zstarczali/GitStar), [FtpStar](https://github.com/zstarczali/FtpStar), [DiffStar](https://github.com/zstarczali/DiffStar) and [NoteStar](https://github.com/zstarczali/NoteStar) and shares their themes, dialogs and AI setup.
 
-Current version **1.2.0**. See [What's new](whatsnew.txt) for the release history.
+Current version **1.2.1**. See [What's new](whatsnew.txt) for the release history.
 
 ## Features
 

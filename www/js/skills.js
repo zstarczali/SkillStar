@@ -218,6 +218,7 @@ function docMenu(ctx, e, d) {
   contextMenu(e, [
     { label: t('Szöveg megtekintése'), icon: 'eye', disabled: d.status !== 'done', action: () => ctx.openText(d.id) },
     { label: t('Leírás szerkesztése…'), icon: 'edit', action: () => ctx.editDoc(d) },
+    d.kind === 'web' ? { label: t('Letöltés folytatása…'), icon: 'globe', disabled: S.queue.includes(d.id), action: () => ctx.resumeWeb(d) } : null,
     ctx.aiOn() ? { label: t('Leírás AI-val'), icon: 'sparkle', disabled: d.status !== 'done', action: () => ctx.aiDescribe(d) } : null,
     '-',
     { label: many ? t('Kijelölt sorok feldolgozása ({0})', sel.length) : t('Újrafeldolgozás'), icon: 'play', disabled: S.queue.includes(d.id), action: () => ctx.process((many ? sel : [d]).map((x) => x.id)) },

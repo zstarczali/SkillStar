@@ -36,6 +36,53 @@ pub struct Archive {
     /// ms since 1970
     pub fetched: i64,
     pub pages: Vec<WebPage>,
+    /// what a stopped download continues with: the links not visited yet…
+    #[serde(default)]
+    pub queue: Vec<Queued>,
+    /// …and every address already seen (visited or queued)
+    #[serde(default)]
+    pub seen: Vec<String>,
+    #[serde(default)]
+    pub max_pages: usize,
+    #[serde(default = "yes")]
+    pub same_prefix: bool,
+    #[serde(default)]
+    pub docs: bool,
+    /// every reachable page was visited (nothing to continue)
+    #[serde(default)]
+    pub finished: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Queued {
+    pub url: String,
+    pub depth: u32,
+}
+
+/// What the "continue download" dialog shows.
+#[derive(Serialize, Debug)]
+pub struct ArchiveInfo {
+    pub url: String,
+    pub pages: usize,
+    pub queued: usize,
+    pub depth: u32,
+    pub max_pages: usize,
+    pub finished: bool,
+}
+
+pub fn archive_info(path: &Path) -> Result<ArchiveInfo, String> {
+    let a = read_archive(path)?;
+    Ok(ArchiveInfo { url: a.url, pages: a.pages.len(), queued: a.queue.len(), depth: a.depth, max_pages: a.max_pages, finished: a.finished })
+}
+
+/// Settings of a stopped download, to continue it with.
+pub fn resume_opts(path: &Path, max_pages: usize) -> Result<CrawlOpts, String> {
+    let a = read_archive(path)?;
+    Ok(CrawlOpts { url: a.url, depth: a.depth, max_pages, same_prefix: a.same_prefix, docs: a.docs, delay_ms: 250, resume: Some(path.to_path_buf()) })
 }
 
 pub struct CrawlOpts {
@@ -48,6 +95,8 @@ pub struct CrawlOpts {
     pub docs: bool,
     /// pause between two requests
     pub delay_ms: u64,
+    /// continue this archive (its pages are kept, its queue is visited)
+    pub resume: Option<PathBuf>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -64,7 +113,12 @@ pub struct WebProgress {
 
 pub struct CrawlResult {
     pub archive: Option<PathBuf>,
+    /// pages in the archive in all
     pub pages: usize,
+    /// pages downloaded now
+    pub new_pages: usize,
+    /// links not visited yet (a later "continue" goes on with them)
+    pub remaining: usize,
     pub docs: Vec<PathBuf>,
     pub errors: Vec<String>,
     pub stopped: bool,
@@ -436,12 +490,66 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         host_key(u) == host && (!same_prefix || u.path().starts_with(prefix) || u.path() == prefix.trim_end_matches('/'))
     }
 
+    let text_hash = |text: &str| {
+        use std::hash::{Hash, Hasher};
+        let mut s = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut s);
+        s.finish()
+    };
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let files_dir = out_dir.join(format!("{host}-{stamp}-files"));
     let mut queue: VecDeque<(Url, u32)> = VecDeque::from([(start.clone(), 0)]);
     let mut seen: HashSet<String> = HashSet::from([norm(&start)]);
     let mut texts: HashSet<u64> = HashSet::new();
     let mut pages: Vec<WebPage> = vec![];
+    // the start page decides where the site is (it may redirect); not when continuing
+    let mut first_is_start = true;
+    let archive_path = match &o.resume {
+        Some(p) => {
+            let a = read_archive(p)?;
+            for pg in &a.pages {
+                texts.insert(text_hash(&pg.text));
+                seen.insert(pg.url.clone());
+            }
+            seen.extend(a.seen.iter().cloned());
+            pages = a.pages;
+            let q: VecDeque<(Url, u32)> = a.queue.iter().filter_map(|x| Url::parse(&x.url).ok().map(|u| (u, x.depth))).collect();
+            if !q.is_empty() || a.finished {
+                // a finished download has nothing left to visit
+                queue = q;
+                first_is_start = false;
+            }
+            // an older archive without a saved queue: the site is walked again from the start
+            // (the pages already there are not added twice)
+            p.clone()
+        }
+        None => out_dir.join(format!("{host}-{stamp}.skweb")),
+    };
+    let stem = archive_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| format!("{host}-{stamp}"));
+    let files_dir = archive_path.parent().unwrap_or(out_dir).join(format!("{stem}-files"));
+    let pages_before = pages.len();
+    // the archive is written after every page: a stop, an error or a crash loses nothing
+    let save = |pages: &[WebPage], queue: &VecDeque<(Url, u32)>, seen: &HashSet<String>, finished: bool| -> Result<(), String> {
+        if pages.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(archive_path.parent().unwrap_or(out_dir)).map_err(|e| e.to_string())?;
+        let a = Archive {
+            url: start.to_string(),
+            title: pages[0].title.clone(),
+            depth: o.depth,
+            fetched: chrono::Utc::now().timestamp_millis(),
+            pages: pages.to_vec(),
+            queue: queue.iter().map(|(u, d)| Queued { url: u.to_string(), depth: *d }).collect(),
+            seen: seen.iter().cloned().collect(),
+            max_pages: o.max_pages,
+            same_prefix: o.same_prefix,
+            docs: o.docs,
+            finished,
+        };
+        let tmp = archive_path.with_extension("skweb.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&a).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &archive_path).map_err(|e| e.to_string())
+    };
     let mut docs: Vec<PathBuf> = vec![];
     let mut errors: Vec<String> = vec![];
     let mut done = 0usize;
@@ -456,12 +564,15 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
             break;
         }
         if pages.len() >= o.max_pages {
+            // not visited: kept for a later "continue"
+            queue.push_front((url, depth));
             break;
         }
         if done > 0 && !robots.allowed(url.path()) {
             continue;
         }
         if done > 0 && delay_ms > 0 && !sleep_cancellable(delay_ms).await {
+            queue.push_front((url, depth));
             stopped = true;
             break;
         }
@@ -479,7 +590,14 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
             Err(e) => {
                 errors.push(format!("{url}: {e}"));
                 failures += 1;
-                if failures >= 4 || done == 1 {
+                if failures >= 4 || done == 1 || CANCEL.load(Ordering::Relaxed) {
+                    // tried again next time
+                    queue.push_front((url.clone(), depth));
+                    seen.insert(norm(&url));
+                    if CANCEL.load(Ordering::Relaxed) {
+                        stopped = true;
+                        break;
+                    }
                     errors.insert(0, tr("A webhely nem válaszol (lehet, hogy túl sok kérés miatt átmenetileg letiltott; próbáld később).", "The website does not answer (it may have blocked you for a while because of too many requests; try later)."));
                     break;
                 }
@@ -492,7 +610,7 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         }
         // a redirect may leave the site
         let final_url = resp.url().clone();
-        if done == 1 {
+        if done == 1 && first_is_start {
             // the start page moved (http → https, another host): the site is where it landed
             host = host_key(&final_url);
             prefix = prefix_of(&final_url);
@@ -554,37 +672,26 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         if text.chars().count() < MIN_TEXT {
             continue;
         }
-        let h = {
-            use std::hash::{Hash, Hasher};
-            let mut s = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut s);
-            s.finish()
-        };
-        if !texts.insert(h) {
+        if !texts.insert(text_hash(&text)) {
             continue;
         }
         let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| final_url.path().to_string());
         pages.push(WebPage { url: norm(&final_url), title, text, depth });
+        if let Err(e) = save(&pages, &queue, &seen, false) {
+            errors.push(e);
+        }
     }
     emit(WebProgress { delay_ms, max: o.max_pages, done, queued: queue.len(), pages: pages.len(), docs: docs.len(), url: String::new() });
 
     let n = pages.len();
+    let finished = queue.is_empty() && !stopped;
     let archive = if pages.is_empty() {
         None
     } else {
-        std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
-        let a = Archive {
-            url: start.to_string(),
-            title: pages[0].title.clone(),
-            depth: o.depth,
-            fetched: chrono::Utc::now().timestamp_millis(),
-            pages,
-        };
-        let p = out_dir.join(format!("{host}-{stamp}.skweb"));
-        std::fs::write(&p, serde_json::to_vec_pretty(&a).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        Some(p)
+        save(&pages, &queue, &seen, finished)?;
+        Some(archive_path.clone())
     };
-    Ok(CrawlResult { archive, pages: n, docs, errors, stopped })
+    Ok(CrawlResult { archive, pages: n, new_pages: n - pages_before, remaining: queue.len(), docs, errors, stopped })
 }
 
 async fn tokio_sleep(ms: u64) {
@@ -710,12 +817,42 @@ mod live {
     fn crawl_site() {
         let url = std::env::var("SKILLSTAR_CRAWL").unwrap_or_default();
         let dir = std::env::temp_dir().join("skillstar-crawl-test");
-        let o = super::CrawlOpts { url, depth: 1, max_pages: 6, same_prefix: true, docs: false, delay_ms: 300 };
+        let o = super::CrawlOpts { url, depth: 1, max_pages: 6, same_prefix: true, docs: false, delay_ms: 300, resume: None };
         let r = tauri::async_runtime::block_on(super::crawl(o, &dir, |p| println!("  {} / queued {} : {}", p.done, p.queued, p.url))).unwrap();
         println!("pages {} docs {} errors {:?} stopped {}", r.pages, r.docs.len(), r.errors, r.stopped);
         let x = super::extract(r.archive.as_ref().unwrap()).unwrap();
         println!("title {:?}, {} pages, outline {:?}", x.title, x.pages.len(), x.outline.iter().map(|o| o.title.as_str()).collect::<Vec<_>>());
         println!("first page:\n{}", x.pages[0].text.chars().take(500).collect::<String>());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live_resume {
+    /// SKILLSTAR_CRAWL=https://doc.rust-lang.org/book/ cargo test --lib web::live_resume -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn crawl_then_continue() {
+        let url = std::env::var("SKILLSTAR_CRAWL").unwrap_or_default();
+        let dir = std::env::temp_dir().join("skillstar-resume-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let o = super::CrawlOpts { url, depth: 2, max_pages: 3, same_prefix: true, docs: false, delay_ms: 200, resume: None };
+        let r = tauri::async_runtime::block_on(super::crawl(o, &dir, |_| {})).unwrap();
+        let p = r.archive.unwrap();
+        println!("first: pages {} new {} remaining {}", r.pages, r.new_pages, r.remaining);
+        let info = super::archive_info(&p).unwrap();
+        println!("info: {info:?}");
+        let o = super::resume_opts(&p, 6).unwrap();
+        let r2 = tauri::async_runtime::block_on(super::crawl(o, &dir, |w| println!("  {} {}", w.done, w.url))).unwrap();
+        println!("second: pages {} new {} remaining {} same file {}", r2.pages, r2.new_pages, r2.remaining, r2.archive.as_ref() == Some(&p));
+        let a = super::read_archive(&p).unwrap();
+        let mut urls: Vec<_> = a.pages.iter().map(|x| x.url.clone()).collect();
+        let n = urls.len();
+        urls.sort();
+        urls.dedup();
+        println!("{} pages, {} unique: {:?}", n, urls.len(), urls);
+        assert_eq!(n, urls.len());
+        assert_eq!(n, 6);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

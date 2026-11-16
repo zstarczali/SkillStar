@@ -68,6 +68,7 @@ const ctx = {
   addFiles: () => addFiles(),
   addFolder: () => addFolder(),
   addWeb: () => addWeb(),
+  resumeWeb: (d) => resumeWeb(d),
   process: (ids) => processDocs(ids),
   cancel: () => invoke('cancel_processing').catch(err),
   removeDocs: (docs) => removeDocs(docs),
@@ -281,7 +282,32 @@ async function addWeb() {
   uiSet('ss.webUrl', url.value.trim()); uiSet('ss.webDepth', depth.value); uiSet('ss.webMax', String(max.value));
   uiSet('ss.webPrefix', prefix.checked ? '1' : '0'); uiSet('ss.webDocs', docs.checked ? '1' : '0');
 
-  // progress dialog: closed by the code when the download ends, its button stops it
+  await runWebJob(() => invoke('web_import', { skillId: S.skillId, url: url.value.trim(), depth: +depth.value, maxPages: Math.max(1, +max.value || 200), samePrefix: prefix.checked, docs: docs.checked }));
+}
+
+/** Continues a stopped website download (a "web" document) into the same document. */
+async function resumeWeb(d) {
+  let info;
+  try { info = await invoke('web_info', { docId: d.id }); } catch (e) { err(e); return; }
+  const left = info.queued > 0 || !info.finished;
+  const max = h('input.inp', { type: 'number', min: info.pages + 1, max: 5000, value: String(info.max_pages > info.pages ? info.max_pages : info.pages + 200) });
+  const ok = await modal({
+    title: t('Letöltés folytatása'),
+    body: h('div.settings-grid',
+      h('div.desc.full', h('b', info.url)),
+      h('div.desc.full', info.finished && !info.queued ? t('Ez a letöltés befejeződött: a webhely minden elérhető oldala megvan ({0} oldal).', info.pages)
+        : info.queued ? t('Eddig {0} oldal jött le; {1} talált link vár még letöltésre.', info.pages, info.queued)
+          : t('Eddig {0} oldal jött le. Ez egy régebbi letöltés, ezért a hivatkozásokat a kezdőoldaltól újra végigjárja (a meglévő oldalak nem duplázódnak).', info.pages)),
+      h('label.field', h('span', t('Legfeljebb ennyi oldal összesen')), max),
+      h('div.note.full', t('Ugyanabba a dokumentumba kerülnek az új oldalak, utána a dokumentum újra feldolgozódik.'))),
+    buttons: [{ label: t('Mégse'), value: false }, { label: t('Folytatás'), value: true, primary: true }],
+  });
+  if (!ok || !left) return;
+  await runWebJob(() => invoke('web_resume', { docId: d.id, maxPages: Math.max(info.pages + 1, +max.value || 200) }), true);
+}
+
+/** Progress dialog of a website download: closed when it ends, its button stops it (what came down is kept). */
+async function runWebJob(call, resumed = false) {
   const line = h('div.desc', t('Kapcsolódás…'));
   const cur = h('div.note', { style: { overflowWrap: 'anywhere', whiteSpace: 'pre-line' } }, '');
   let dlg = null;
@@ -293,8 +319,11 @@ async function addWeb() {
     cur.textContent = p.url + (p.delay_ms >= 2000 ? '\n' + t('A webhely kérésére {0} másodpercet vár két oldal között.', Math.round(p.delay_ms / 1000)) : '');
   });
   try {
-    const r = await invoke('web_import', { skillId: S.skillId, url: url.value.trim(), depth: +depth.value, maxPages: Math.max(1, +max.value || 200), samePrefix: prefix.checked, docs: docs.checked });
-    toast((r.stopped ? t('Leállítva. ') : '') + t('{0} weboldal és {1} dokumentum került be.', r.pages, r.docs) + (r.errors.length ? ' ' + t('{0} cím nem volt elérhető.', r.errors.length) : ''), r.added.length ? 'ok' : 'err', 6000);
+    const r = await call();
+    const more = r.remaining ? ' ' + t('{0} link vár még: jobb klikk a dokumentumon → Letöltés folytatása.', r.remaining) : '';
+    toast((r.stopped ? t('Leállítva. ') : '')
+      + (resumed ? t('{0} új weboldal (összesen {1}), {2} dokumentum.', r.new_pages, r.pages, r.docs) : t('{0} weboldal és {1} dokumentum került be.', r.pages, r.docs))
+      + (r.errors.length ? ' ' + t('{0} cím nem volt elérhető.', r.errors.length) : '') + more, r.added.length || r.new_pages ? 'ok' : 'err', 9000);
     S.view = 'docs';
     await reloadDocs();
     await refreshSkills();
