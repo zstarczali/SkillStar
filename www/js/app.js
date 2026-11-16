@@ -6,6 +6,7 @@ import {
   initUiState, uiGet, uiSet, editMenu, splitter,
 } from './util.js';
 import { t, setLang, getLang } from './i18n.js';
+import { aiUsageInit, aiUsageItem } from './aiusage.js';
 import { mdRender } from './markdown.js';
 import {
   renderSidebar, renderViewTabs, renderDocs, renderText, renderSkillForm, renderBuild, renderSearch,
@@ -430,7 +431,7 @@ function renderStatusbar() {
     sk ? h('span', t('{0} dokumentum · {1} oldal', sk.docs, sk.pages)) : null,
     engineIndicator(ctx),
     zoomNow() !== 1 ? h('span.zoom-status', { title: t('Nagyítás visszaállítása 100%-ra (Ctrl+0)'), on: { click: () => setZoom(1) } }, Math.round(zoomNow() * 100) + '%') : null,
-    aiOn() ? h('span', t('AI: {0}', aiKey() ? aiModel() : t('nincs beállítva'))) : null,
+    aiOn() ? aiUsageItem(aiKey() ? aiModel() : t('nincs beállítva')) : null,
     S.update?.updateAvailable ? h('span.update-status', { title: t('Kattints a telepítéshez'), on: { click: () => updateShowAvailable() } }, icon('fetch'), t('Frissítés elérhető: v{0}', S.update.latestVersion)) : null,
   );
 }
@@ -1240,6 +1241,7 @@ async function boot() {
     await reloadDocs();
   }
   renderAll();
+  aiUsageInit(() => renderStatusbar());
   startDonationTimer();
   loadEngine();
   initDrop();
