@@ -33,8 +33,9 @@ function formatChips(sk, onChange, compact = false) {
 }
 const fmtString = (set) => FORMATS().map((f) => f[0]).filter((f) => set.has(f)).join(',');
 
-export const KIND_ICON = { pdf: 'pdf', docx: 'word', odt: 'word', pptx: 'slides', image: 'image', html: 'globe', md: 'note', txt: 'file' };
-export const DOC_FILTER = ['pdf', 'docx', 'docm', 'dotx', 'pptx', 'odt', 'html', 'htm', 'md', 'markdown', 'txt', 'text', 'csv', 'rst', 'json', 'xml', 'yaml', 'yml', 'png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
+export const KIND_ICON = { pdf: 'pdf', docx: 'word', odt: 'word', pptx: 'slides', image: 'image', html: 'globe', md: 'note', txt: 'file',
+  epub: 'pages', mobi: 'pages', fb2: 'pages', rtf: 'word', htmlz: 'globe', djvu: 'pdf', cbz: 'image', web: 'globe' };
+export const DOC_FILTER = ['pdf', 'docx', 'docm', 'dotx', 'pptx', 'odt', 'epub', 'mobi', 'azw', 'azw3', 'prc', 'pdb', 'fb2', 'fbz', 'zip', 'rtf', 'djvu', 'djv', 'cbz', 'htmlz', 'html', 'htm', 'md', 'markdown', 'txt', 'text', 'csv', 'rst', 'json', 'xml', 'yaml', 'yml', 'png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'gif', 'webp'];
 
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const docTitle = (d) => (d.title || '').trim() || d.name;
@@ -152,6 +153,7 @@ export function renderDocs(ctx, el) {
   const head = h('div.docs-bar',
     h('button.btn', { on: { click: () => ctx.addFiles() } }, icon('addFiles'), t('Fájlok…')),
     h('button.btn', { on: { click: () => ctx.addFolder() } }, icon('folder'), t('Mappa…')),
+    h('button.btn', { title: t('Weboldal letöltése a hivatkozásait követve, megadható mélységig'), on: { click: () => ctx.addWeb() } }, icon('globe'), t('Weboldal…')),
     h('span.sep'),
     running ? h('button.btn.danger', { on: { click: () => ctx.cancel() } }, icon('stop'), t('Leállítás'))
       : h('button.btn.primary', { disabled: !toProcess.length && !selDocs.length, title: t('Az új, hibás és megváltozott dokumentumok feldolgozása. Ha sorokat jelöltél ki (kattintás, Ctrl/Shift + kattintás), csak azokat dolgozza fel; a pipa nem kijelölés, hanem hogy bekerül-e a skillbe.'),
@@ -164,7 +166,7 @@ export function renderDocs(ctx, el) {
   if (!docs.length) {
     el.replaceChildren(h('div.docs', head, h('div.drop-hint', { on: { click: () => ctx.addFiles() } },
       icon('addFiles'), h('b', t('Húzd ide a dokumentumokat')),
-      h('span', t('PDF, Word (DOCX), PowerPoint (PPTX), ODT, HTML, Markdown, szöveg és képek (OCR). Mappát is ráhúzhatsz.')),
+      h('span', t('PDF, Word (DOCX), PowerPoint (PPTX), ODT, RTF, e-könyvek (EPUB, MOBI / AZW3, FB2, DjVu, CBZ), HTML, Markdown, szöveg és képek (OCR). Mappát is ráhúzhatsz, vagy letölthetsz egy weboldalt.')),
       h('button.btn.primary', icon('addFiles'), t('Fájlok kiválasztása…')))));
     return;
   }

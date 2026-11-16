@@ -1009,3 +1009,66 @@ pub fn save_window_state_later(app: &tauri::AppHandle) {
         let _ = app.run_on_main_thread(move || save_window_state(&main));
     });
 }
+
+// ───────────────────────────── website import ─────────────────────────────
+
+#[derive(Serialize)]
+pub struct WebImport {
+    /// new documents: the website itself, then the downloaded linked documents
+    pub added: Vec<i64>,
+    pub pages: usize,
+    pub docs: usize,
+    pub errors: Vec<String>,
+    pub stopped: bool,
+}
+
+/// Downloads a website (its pages up to `depth` links away, at most `max_pages`) and
+/// adds it to the skill as one document; linked documents become documents too.
+/// Progress: `web-progress` events. Stop: web_cancel (what was downloaded is kept).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn web_import(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    skill_id: i64,
+    url: String,
+    depth: u32,
+    max_pages: u32,
+    same_prefix: bool,
+    docs: bool,
+) -> Result<WebImport, String> {
+    let opts = crate::web::CrawlOpts {
+        url,
+        depth: depth.min(10),
+        max_pages: max_pages.clamp(1, 5000) as usize,
+        same_prefix,
+        docs,
+        delay_ms: 250,
+    };
+    let out_dir = state.data_dir.join("web");
+    let emit_app = app.clone();
+    let r = crate::web::crawl(opts, &out_dir, move |p| {
+        let _ = emit_app.emit("web-progress", p);
+    })
+    .await?;
+    if r.archive.is_none() && r.docs.is_empty() {
+        let why = r.errors.first().cloned().unwrap_or_else(|| tr("nem találtam olvasható szöveget", "no readable text was found"));
+        return Err(format!("{}: {why}", tr("A weboldalról semmi sem került le", "Nothing was downloaded from the website")));
+    }
+    let files: Vec<PathBuf> = r.archive.iter().cloned().chain(r.docs.iter().cloned()).collect();
+    let added = state.with_db(|c| {
+        let mut added = vec![];
+        for f in &files {
+            if let Some(id) = db::add_document(c, skill_id, f)? {
+                added.push(id);
+            }
+        }
+        Ok(added)
+    })?;
+    Ok(WebImport { added, pages: r.pages, docs: r.docs.len(), errors: r.errors, stopped: r.stopped })
+}
+
+#[tauri::command]
+pub fn web_cancel() {
+    crate::web::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+}

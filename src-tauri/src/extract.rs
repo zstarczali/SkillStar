@@ -1,5 +1,6 @@
 //! Text out of documents: PDF (text layer, OCR for scanned pages), DOCX,
-//! PPTX, ODT, HTML, plain text / Markdown and images (OCR).
+//! PPTX, ODT, HTML, plain text / Markdown, images (OCR), e-books (ebook.rs:
+//! EPUB, MOBI / AZW3, FB2, RTF, DjVu, CBZ, HTMLZ) and downloaded websites (web.rs).
 
 use crate::ocr::OcrCfg;
 use crate::settings::tr;
@@ -33,11 +34,23 @@ pub const TEXT_EXTS: &[&str] = &["txt", "md", "markdown", "text", "csv", "log", 
 /// The kind of a file by its extension (None = not supported).
 pub fn kind_of(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if name.ends_with(".fb2.zip") {
+        return Some("fb2");
+    }
     Some(match ext.as_str() {
         "pdf" => "pdf",
         "docx" | "docm" | "dotx" => "docx",
         "pptx" => "pptx",
         "odt" => "odt",
+        "epub" => "epub",
+        "mobi" | "azw" | "azw3" | "prc" | "pdb" => "mobi",
+        "fb2" | "fbz" => "fb2",
+        "rtf" => "rtf",
+        "djvu" | "djv" => "djvu",
+        "cbz" => "cbz",
+        "htmlz" => "htmlz",
+        "skweb" => "web",
         "html" | "htm" | "xhtml" => "html",
         "md" | "markdown" => "md",
         e if TEXT_EXTS.contains(&e) => "txt",
@@ -83,6 +96,14 @@ pub fn extract(path: &Path, o: &Opts, progress: Progress) -> Result<Extracted, S
         "docx" => crate::docx::extract(path)?,
         "pptx" => crate::docx::extract_pptx(path)?,
         "odt" => crate::docx::extract_odt(path)?,
+        "epub" => crate::ebook::extract_epub(path)?,
+        "mobi" => crate::ebook::extract_mobi(path)?,
+        "fb2" => crate::ebook::extract_fb2(path)?,
+        "rtf" => crate::ebook::extract_rtf(path)?,
+        "htmlz" => crate::ebook::extract_htmlz(path)?,
+        "cbz" => crate::ebook::extract_cbz(path, o, progress)?,
+        "djvu" => crate::ebook::extract_djvu(path, o, progress)?,
+        "web" => crate::web::extract(path)?,
         "html" => {
             let s = read_text(path)?;
             let (md, title) = html_to_text(&s);
@@ -297,6 +318,11 @@ pub fn html_to_text(html: &str) -> (String, Option<String>) {
                     if chunk.starts_with(char::is_whitespace) && !out.ends_with([' ', '\n']) {
                         out.push(' ');
                     }
+                    // a text line starting with '#' (e.g. a comment in code) is not a heading
+                    let line_start = out.trim_end_matches(' ').is_empty() || out.trim_end_matches(' ').ends_with('\n');
+                    if line_start && collapsed.starts_with('#') {
+                        out.push('\\');
+                    }
                     out.push_str(&collapsed);
                     if chunk.ends_with(char::is_whitespace) {
                         out.push(' ');
@@ -319,7 +345,9 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(a) = rest.find('&') {
         out.push_str(&rest[..a]);
         rest = &rest[a..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // ';' is ASCII, so its byte position is a char boundary (slicing `rest` at 12 bytes
+        // could cut a multi-byte character)
+        let Some(semi) = rest.as_bytes().iter().take(12).position(|&b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -368,6 +396,10 @@ mod tests {
         assert_eq!(kind_of(Path::new("x.jpeg")), Some("image"));
         assert_eq!(kind_of(Path::new("x.md")), Some("md"));
         assert_eq!(kind_of(Path::new("x.exe")), None);
+        assert_eq!(kind_of(Path::new("Book.EPUB")), Some("epub"));
+        assert_eq!(kind_of(Path::new("b.azw3")), Some("mobi"));
+        assert_eq!(kind_of(Path::new("b.fb2.zip")), Some("fb2"));
+        assert_eq!(kind_of(Path::new("site.skweb")), Some("web"));
     }
 
     #[test]
@@ -393,6 +425,9 @@ mod tests {
         let (t, title) = html_to_text("<html><head><title>Doc &amp; co</title><style>p{}</style></head><body><h2>Head</h2><p>One&nbsp;two <b>three</b></p><ul><li>a</li><li>b</li></ul><script>x()</script></body></html>");
         assert_eq!(title.as_deref(), Some("Doc & co"));
         assert_eq!(t, "## Head\n\nOne two three\n\n- a\n- b");
+        // a '#' line of the text is escaped, a multi-byte character after '&' does not panic
+        let (t, _) = html_to_text("<pre># comment</pre><p>R&amp;D &…………… x</p>");
+        assert_eq!(t, "\\# comment\n\nR&D &…………… x");
     }
 
     #[test]

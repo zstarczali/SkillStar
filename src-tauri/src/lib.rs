@@ -3,6 +3,7 @@ mod claude_cli;
 mod commands;
 mod db;
 mod docx;
+mod ebook;
 mod extract;
 mod ocr;
 mod pdf;
@@ -13,6 +14,7 @@ mod skill;
 mod update;
 mod usage;
 mod vector;
+mod web;
 
 use commands::AppState;
 use tauri::Manager;
@@ -119,6 +121,8 @@ pub fn run() {
             commands::delete_skill,
             commands::list_documents,
             commands::add_documents,
+            commands::web_import,
+            commands::web_cancel,
             commands::remove_documents,
             commands::update_document,
             commands::set_document_rag,
