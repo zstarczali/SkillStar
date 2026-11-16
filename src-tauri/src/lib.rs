@@ -11,6 +11,7 @@ mod rag;
 mod settings;
 mod skill;
 mod update;
+mod usage;
 mod vector;
 
 use commands::AppState;
@@ -59,6 +60,7 @@ pub fn run() {
         )
         .setup(|app| {
             let dir = app.path().app_config_dir().unwrap_or_else(|_| std::env::temp_dir().join("SkillStar"));
+            usage::init(app.handle().clone(), dir.clone());
             let data = app.path().app_data_dir().unwrap_or_else(|_| dir.clone());
             let docs = app
                 .path()
@@ -104,6 +106,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            usage::ai_usage,
+            usage::ai_usage_reset,
             commands::get_settings,
             commands::save_settings,
             commands::set_ui_language,
