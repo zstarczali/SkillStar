@@ -114,3 +114,6 @@ a README.md that explains the steps:
 - deepseek/: system prompt + the text cut into context-sized parts;
 - rag/: chunks.jsonl, documents.json and a system prompt for any LLM
   and vector store.
+
+License: MIT. Copyright (c) 2026 Zsolt Tarczali. See LICENSE.
+Third-party components retain their own licenses.

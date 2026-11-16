@@ -9,7 +9,7 @@
   <a href="https://www.c64va.pro/skillstar.html"><img src="https://img.shields.io/badge/website-c64va.pro-e05d44?style=flat" alt="Website"></a>
   <a href="https://github.com/zstarczali/SkillStar/blob/main/package.json"><img src="https://img.shields.io/github/package-json/v/zstarczali/SkillStar/main?label=version&color=4c1" alt="Version"></a>
   <a href="https://github.com/zstarczali/SkillStar/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/zstarczali/SkillStar/build.yml?branch=main&label=build" alt="Build"></a>
-  <a href="https://github.com/zstarczali/SkillStar/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-freeware-blue" alt="License: Freeware"></a>
+  <a href="https://github.com/zstarczali/SkillStar/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <a href="https://www.c64va.pro/register/donate.php"><img src="https://img.shields.io/badge/donate-PayPal-00457C?logo=paypal&logoColor=white" alt="Donate"></a>
 </p>
 <p align="center">
@@ -136,7 +136,7 @@ www/vendor/     marked 18.2.0 (MIT) and DOMPurify 3.4.18 (Apache-2.0 / MPL-2.0)
 
 ## License
 
-SkillStar is freeware: free to download and use, including at work, but it may not be copied, redistributed, published, sold, or modified without the author's written permission. See [LICENSE](LICENSE). The bundled third-party libraries in `www/vendor/` keep their own licenses (`LICENSE-marked.md`, `LICENSE-dompurify.txt`); PDFium is BSD-3-Clause / Apache-2.0.
+SkillStar is free and open source under the MIT License, © 2026 Zsolt Tarczali. See [LICENSE](LICENSE). The bundled third-party libraries in `www/vendor/` keep their own licenses (`LICENSE-marked.md`, `LICENSE-dompurify.txt`); PDFium is BSD-3-Clause / Apache-2.0.
 
 If SkillStar is useful to you, you can support its development with a small [donation](https://www.c64va.pro/register/donate.php).
 

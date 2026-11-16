@@ -163,7 +163,7 @@ export const EN = {
   'Dokumentumokból Claude skill – helyi OCR, helyi adatbázis.': 'Claude skills from your documents – local OCR, local database.',
   'Weboldal': 'Website',
   'Rust + Tauri 2. A GitStar testvérprogramja (GitStar, FtpStar, DiffStar, NoteStar). PDF: pdfium (BSD). OCR: Windows.Media.Ocr vagy Tesseract. AI: Anthropic Claude (API vagy Claude Code CLI) vagy DeepSeek.': 'Rust + Tauri 2. A sibling of GitStar (GitStar, FtpStar, DiffStar, NoteStar). PDF: pdfium (BSD). OCR: Windows.Media.Ocr or Tesseract. AI: Anthropic Claude (API or Claude Code CLI) or DeepSeek.',
-  'A SkillStar ingyenes (freeware). Ha hasznos neked, egy kis adománnyal támogathatod a fejlesztést. Köszönöm!': 'SkillStar is free (freeware). If you find it useful, a small donation supports its development. Thank you!',
+  'A SkillStar ingyenes, MIT-licencű. Ha hasznos neked, egy kis adománnyal támogathatod a fejlesztést. Köszönöm!': 'SkillStar is free and MIT-licensed. If you find it useful, a small donation supports its development. Thank you!',
   'Frissítések keresése': 'Check for updates',
   'Beállítások mappa': 'Settings folder',
   'Másolás': 'Copy',
