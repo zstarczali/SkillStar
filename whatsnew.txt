@@ -1,6 +1,22 @@
 SkillStar - What's new
 ======================
 
+1.2.0
+-----
+- E-books: EPUB (2 and 3, chapters and the table of contents of the
+  book), Kindle / Mobipocket (MOBI, AZW, AZW3, PRC, PDB), FictionBook
+  (FB2, FBZ, FB2.ZIP), RTF, HTMLZ, DjVu (text layer, OCR for scanned
+  pages through DjVuLibre) and comic books (CBZ, OCR). Copy protected
+  (DRM) books are reported instead of giving garbage.
+- Website download (Documents -> Website...): the pages of a site are
+  downloaded following their links up to the depth you choose (0-5),
+  at most the number of pages you give, on the same site (optionally
+  only under the folder of the start page), robots.txt respected. The
+  main text of every page (without menus, headers and footers) becomes
+  one document, a page per web page with its title and address; the
+  linked documents (PDF, EPUB, DOCX...) can be downloaded as separate
+  documents. Live progress, and Stop keeps what was downloaded.
+
 1.1.1
 -----
 - AI token counter in the status bar: the tokens used by the AI

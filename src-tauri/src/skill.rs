@@ -276,6 +276,15 @@ fn kind_label(l: &L, d: &Document) -> String {
         "odt" => "OpenDocument (ODT)".to_string(),
         "html" => "HTML".to_string(),
         "md" => "Markdown".to_string(),
+        "epub" => l.t("EPUB e-könyv", "EPUB e-book").to_string(),
+        "mobi" => l.t("Kindle / Mobipocket e-könyv", "Kindle / Mobipocket e-book").to_string(),
+        "fb2" => l.t("FictionBook e-könyv", "FictionBook e-book").to_string(),
+        "rtf" => "RTF".to_string(),
+        "htmlz" => "HTMLZ".to_string(),
+        "djvu" if d.ocr_pages > 0 => l.t("DjVu, OCR", "DjVu, OCR").to_string(),
+        "djvu" => l.t("DjVu szövegréteg", "DjVu text layer").to_string(),
+        "cbz" => l.t("képregény (CBZ), OCR", "comic book (CBZ), OCR").to_string(),
+        "web" => l.t("weboldal (letöltött oldalak)", "website (downloaded pages)").to_string(),
         _ => l.t("szöveg", "text").to_string(),
     };
     src
@@ -287,6 +296,10 @@ fn pages_meaning(l: &L, d: &Document) -> &'static str {
         "pptx" => l.t("dia", "slide"),
         "docx" | "odt" => l.t("oldal (Word oldaltörés szerint; ha nincs, kb. 3500 karakteres szakasz)", "page (Word page breaks; without them ~3500-character sections)"),
         "image" => l.t("kép", "image"),
+        "djvu" => l.t("DjVu-oldal", "DjVu page"),
+        "cbz" => l.t("képregény-oldal", "comic page"),
+        "epub" | "mobi" | "fb2" => l.t("fejezet, hosszabbnál kb. 3500 karakteres szakasz", "chapter, longer ones in ~3500-character sections"),
+        "web" => l.t("weboldal, hosszabbnál kb. 3500 karakteres szakasz", "web page, longer ones in ~3500-character sections"),
         _ => l.t("kb. 3500 karakteres szakasz", "~3500-character section"),
     }
 }

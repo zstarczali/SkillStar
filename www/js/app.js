@@ -66,6 +66,7 @@ const ctx = {
   renderContent: () => renderContent(),
   addFiles: () => addFiles(),
   addFolder: () => addFolder(),
+  addWeb: () => addWeb(),
   process: (ids) => processDocs(ids),
   cancel: () => invoke('cancel_processing').catch(err),
   removeDocs: (docs) => removeDocs(docs),
@@ -246,6 +247,63 @@ async function addFiles() {
 async function addFolder() {
   const r = await invoke('plugin:dialog|open', { options: { directory: true, multiple: false, title: t('Mappa hozzáadása (almappákkal)') } }).catch(() => null);
   if (r) addPaths(Array.isArray(r) ? r : [r]);
+}
+
+/**
+ * Website import: the pages of a site are downloaded following their links up to a depth;
+ * the site becomes one document (a page per web page), linked documents separate ones.
+ */
+async function addWeb() {
+  if (!S.skillId) {
+    const id = await newSkill();
+    if (!id) return;
+  }
+  const url = h('input.inp', { value: uiGet('ss.webUrl') || '', placeholder: 'https://example.com/docs/', spellcheck: 'false' });
+  const depth = h('select.inp', [0, 1, 2, 3, 4, 5].map((n) => h('option', { value: String(n) },
+    n === 0 ? t('0 – csak ez az oldal') : n === 1 ? t('1 – és az innen linkelt oldalak') : t('{0} szint', n))));
+  depth.value = uiGet('ss.webDepth') || '2';
+  const max = h('input.inp', { type: 'number', min: 1, max: 5000, value: uiGet('ss.webMax') || '200' });
+  const prefix = h('input', { type: 'checkbox', checked: uiGet('ss.webPrefix') !== '0' });
+  const docs = h('input', { type: 'checkbox', checked: uiGet('ss.webDocs') !== '0' });
+  const ok = await modal({
+    title: t('Weboldal letöltése'),
+    body: h('div.settings-grid',
+      h('label.field.full', h('span', t('Kezdőoldal címe')), url),
+      h('label.field', h('span', t('Mélység (ennyi linknyire megy el)')), depth),
+      h('label.field', h('span', t('Legfeljebb ennyi oldal')), max),
+      h('label.chk.full', prefix, t('Csak a kezdőoldal mappája alatti oldalak (pl. /docs/… alatt marad)')),
+      h('label.chk.full', docs, t('A hivatkozott dokumentumok letöltése is (PDF, EPUB, DOCX…), külön dokumentumként')),
+      h('div.note.full', t('Ugyanazon a webhelyen marad, betartja a robots.txt-t, és két kérés között kicsit vár. Az oldalak fő szövegét menti (menük, láblécek nélkül) egyetlen dokumentumba, oldalanként a címmel és a forrás-címmel; a fájlok a SkillStar adatmappájába kerülnek.'))),
+    buttons: [{ label: t('Mégse'), value: false }, { label: t('Letöltés'), value: true, primary: true }],
+  });
+  if (!ok || !url.value.trim()) return;
+  uiSet('ss.webUrl', url.value.trim()); uiSet('ss.webDepth', depth.value); uiSet('ss.webMax', String(max.value));
+  uiSet('ss.webPrefix', prefix.checked ? '1' : '0'); uiSet('ss.webDocs', docs.checked ? '1' : '0');
+
+  // progress dialog: closed by the code when the download ends, its button stops it
+  const line = h('div.desc', t('Kapcsolódás…'));
+  const cur = h('div.note', { style: { overflowWrap: 'anywhere' } }, '');
+  let dlg = null;
+  const shown = modal({ title: t('Weboldal letöltése'), body: h('div', line, cur), onOpen: (m) => { dlg = m; },
+    buttons: [{ label: t('Leállítás (a már letöltött megmarad)'), value: 'stop', danger: true }] });
+  shown.then((v) => { if (v === 'stop' || v === null) invoke('web_cancel').catch(() => {}); });
+  const un = await window.__TAURI__.event.listen('web-progress', ({ payload: p }) => {
+    line.textContent = t('{0} cím megnézve · {1} oldal mentve · {2} dokumentum · {3} a sorban', p.done, p.pages, p.docs, p.queued);
+    cur.textContent = p.url;
+  });
+  try {
+    const r = await invoke('web_import', { skillId: S.skillId, url: url.value.trim(), depth: +depth.value, maxPages: Math.max(1, +max.value || 200), samePrefix: prefix.checked, docs: docs.checked });
+    toast((r.stopped ? t('Leállítva. ') : '') + t('{0} weboldal és {1} dokumentum került be.', r.pages, r.docs) + (r.errors.length ? ' ' + t('{0} cím nem volt elérhető.', r.errors.length) : ''), r.added.length ? 'ok' : 'err', 6000);
+    S.view = 'docs';
+    await reloadDocs();
+    await refreshSkills();
+    renderAll();
+    if (r.added.length && S.settings.auto_process !== false) processDocs(r.added);
+  } catch (e) { err(e); }
+  finally {
+    un();
+    dlg?.querySelector('.modal-x')?.click();
+  }
 }
 
 async function processDocs(ids) {
@@ -458,12 +516,13 @@ function renderWelcome(el) {
     h('h1', h('img', { src: 'img/icon.svg', alt: '' }), 'SkillStar'),
     h('div.lead', t('DOCX-ekből, PDF-ekből és más dokumentumokból Claude skill csomagot készít – helyi OCR-rel és helyi adatbázissal, a fájljaid nem hagyják el a gépet.')),
     h('div.wl-steps',
-      step(1, t('Dokumentumok'), t('Húzd be a fájlokat vagy egy egész mappát: PDF, DOCX, PPTX, ODT, HTML, Markdown, TXT, képek.')),
+      step(1, t('Dokumentumok'), t('Húzd be a fájlokat vagy egy egész mappát: PDF, DOCX, PPTX, ODT, RTF, e-könyvek (EPUB, MOBI, AZW3, FB2, DjVu, CBZ), HTML, Markdown, TXT, képek – vagy tölts le egy weboldalt.')),
       step(2, t('Feldolgozás'), t('Szövegkinyerés, a szkennelt oldalakon OCR; tartalomjegyzék és kulcsszó-mutató a helyi adatbázisba.')),
       step(3, t('Skill csomag'), t('SKILL.md + tudásbázis oldalszámokkal: Claude Code plugin mappa, .plugin fájl és claude.ai-ra feltölthető ZIP.'))),
     h('div.wl-cards',
       card('newSkill', t('Új skill'), t('Név, nyelv – és már húzhatod is bele a fájlokat'), 'Ctrl+N', () => newSkill()),
       card('addFiles', t('Fájlok hozzáadása'), t('Új skill a kiválasztott fájlokból'), 'Ctrl+O', () => addFiles()),
+      card('globe', t('Weboldal letöltése'), t('Egy webhely oldalai a hivatkozásokat követve, megadható mélységig'), null, () => addWeb()),
       st && !st.pdfium ? card('fetch', t('pdfium letöltése'), t('A PDF-ekhez szükséges (kb. 6 MB, egyszer)'), null, () => downloadPdfium())
         : card('scan', t('OCR és szövegkinyerés'), st?.ocr?.active === 'windows' ? t('Windows beépített OCR: {0}', (st.ocr.windows_langs || []).map((l) => l.tag).join(', ')) : st?.ocr?.active === 'tesseract' ? 'Tesseract' : t('Nincs OCR motor – nézd meg a beállításokat'), null, () => settingsDlg('extract')),
       aiOn() ? card('sparkle', t('AI segítség'), t('Dokumentum-összefoglalók, skill-leírás, kérdések a tudásbázisból'), null, () => settingsDlg('ai'))
@@ -873,7 +932,7 @@ async function aboutDlg() {
   ];
   const text = 'SkillStar ' + rows.map(([k, v]) => `${k}: ${v}`).join('\n');
   const features = [
-    ['pdf', 'PDF'], ['word', 'DOCX / ODT'], ['slides', 'PPTX'], ['image', t('Képek')], ['scan', t('Helyi OCR')],
+    ['pdf', 'PDF'], ['word', 'DOCX / ODT / RTF'], ['slides', 'PPTX'], ['pages', t('E-könyvek: EPUB, MOBI, AZW3, FB2, DjVu')], ['globe', t('Weboldal letöltése')], ['image', t('Képek')], ['scan', t('Helyi OCR')],
     ['search', t('Teljes szöveges keresés (SQLite FTS5)')], ['pkg', t('Claude skill / plugin')], ['sparkle', t('Kapcsolható AI')], ['globe', t('Magyar / English')],
   ];
   const body = h('div.about',
@@ -1210,7 +1269,7 @@ async function initDrop() {
     if (on) {
       const sk = curSkill();
       overlay.querySelector('b').textContent = sk ? t('Engedd el: hozzáadás ehhez: {0}', sk.title) : t('Engedd el: új skill ezekből a fájlokból');
-      overlay.querySelector('span').textContent = t('PDF, DOCX, PPTX, ODT, HTML, MD, TXT, képek – mappák is');
+      overlay.querySelector('span').textContent = t('PDF, DOCX, PPTX, ODT, RTF, EPUB, MOBI, AZW3, FB2, DjVu, CBZ, HTML, MD, TXT, képek – mappák is');
       if (!overlay.isConnected) document.body.append(overlay);
     } else overlay.remove();
   };
