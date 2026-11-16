@@ -24,6 +24,7 @@ const S = {
   docSel: new Set(),
   progress: {},     // doc id → {stage, done, total}
   queue: [],        // doc ids waiting or processing
+  finished: new Set(), // doc ids whose last event said done / error (a queue snapshot may be older)
   engine: null,     // engine_status
   textDoc: 0,
   textPage: 1,
@@ -310,7 +311,8 @@ async function processDocs(ids) {
   if (!ids?.length) return;
   try {
     await invoke('process_documents', { ids });
-    S.queue = await invoke('processing_queue');
+    // a fast document can finish before this answer arrives: its done event must win
+    S.queue = (await invoke('processing_queue')).filter((id) => !S.finished.has(id));
   } catch (e) {
     if (String(e) === '\u0001pdfium') {
       const ok = await confirmDlg(t('pdfium szükséges'),
@@ -322,6 +324,8 @@ async function processDocs(ids) {
     err(e);
   }
   await reloadDocs();
+  // safety net: a document the database already shows finished is not waiting any more
+  S.queue = S.queue.filter((id) => { const d = S.docs.find((x) => x.id === id); return !d || d.status === 'queued' || d.status === 'processing'; });
   setBusy(false);
 }
 
@@ -372,7 +376,9 @@ function onProgress(p) {
   if (p.status === 'processing') S.progress[p.id] = { stage: p.stage, done: p.done, total: p.total };
   else delete S.progress[p.id];
   if (!S.queue.includes(p.id) && (p.status === 'queued' || p.status === 'processing')) S.queue.push(p.id);
+  if (p.status === 'queued' || p.status === 'processing') S.finished.delete(p.id);
   if (p.status === 'done' || p.status === 'error' || p.status === 'new') {
+    S.finished.add(p.id);
     S.queue = S.queue.filter((x) => x !== p.id);
     forgetText(p.id);
     if (p.status === 'error' && d) toast(`${d.name}: ${p.error}`, 'err');
