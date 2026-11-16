@@ -16,6 +16,12 @@ SkillStar - What's new
   one document, a page per web page with its title and address; the
   linked documents (PDF, EPUB, DOCX...) can be downloaded as separate
   documents. Live progress, and Stop keeps what was downloaded.
+  The Crawl-delay a site asks for in its robots.txt is kept (e.g.
+  15 s on codebase.c64.org), busy servers are tried again (429 / 503,
+  Retry-After), and the download stops with a clear message when the
+  site stops answering. Edit / history / login links of wikis are
+  skipped.
+- Fixed: after a very quick processing the busy bar could keep running.
 
 1.1.1
 -----
