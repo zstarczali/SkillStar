@@ -1017,6 +1017,9 @@ pub struct WebImport {
     /// new documents: the website itself, then the downloaded linked documents
     pub added: Vec<i64>,
     pub pages: usize,
+    pub new_pages: usize,
+    /// links not visited yet: "continue download" goes on with them
+    pub remaining: usize,
     pub docs: usize,
     pub errors: Vec<String>,
     pub stopped: bool,
@@ -1044,8 +1047,30 @@ pub async fn web_import(
         same_prefix,
         docs,
         delay_ms: 250,
+        resume: None,
     };
     let out_dir = state.data_dir.join("web");
+    run_web(app, &state, skill_id, opts, &out_dir, None).await
+}
+
+/// What a downloaded website document holds: pages, links still to visit.
+#[tauri::command]
+pub fn web_info(state: State<'_, AppState>, doc_id: i64) -> Result<crate::web::ArchiveInfo, String> {
+    let d = state.with_db(|c| db::document(c, doc_id))?;
+    crate::web::archive_info(Path::new(&d.path))
+}
+
+/// Continues a stopped website download into the same document, up to `max_pages` pages in all.
+#[tauri::command]
+pub async fn web_resume(app: tauri::AppHandle, state: State<'_, AppState>, doc_id: i64, max_pages: u32) -> Result<WebImport, String> {
+    let d = state.with_db(|c| db::document(c, doc_id))?;
+    let path = PathBuf::from(&d.path);
+    let opts = crate::web::resume_opts(&path, max_pages.clamp(1, 5000) as usize)?;
+    let out_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| state.data_dir.join("web"));
+    run_web(app, &state, d.skill_id, opts, &out_dir, Some(doc_id)).await
+}
+
+async fn run_web(app: tauri::AppHandle, state: &State<'_, AppState>, skill_id: i64, opts: crate::web::CrawlOpts, out_dir: &Path, resumed: Option<i64>) -> Result<WebImport, String> {
     let emit_app = app.clone();
     let r = crate::web::crawl(opts, &out_dir, move |p| {
         let _ = emit_app.emit("web-progress", p);
@@ -1055,9 +1080,10 @@ pub async fn web_import(
         let why = r.errors.first().cloned().unwrap_or_else(|| tr("nem találtam olvasható szöveget", "no readable text was found"));
         return Err(format!("{}: {why}", tr("A weboldalról semmi sem került le", "Nothing was downloaded from the website")));
     }
-    let files: Vec<PathBuf> = r.archive.iter().cloned().chain(r.docs.iter().cloned()).collect();
+    // a continued archive is the same document: it is processed again
+    let files: Vec<PathBuf> = if resumed.is_some() { r.docs.clone() } else { r.archive.iter().cloned().chain(r.docs.iter().cloned()).collect() };
     let added = state.with_db(|c| {
-        let mut added = vec![];
+        let mut added: Vec<i64> = resumed.filter(|_| r.new_pages > 0).into_iter().collect();
         for f in &files {
             if let Some(id) = db::add_document(c, skill_id, f)? {
                 added.push(id);
@@ -1065,7 +1091,7 @@ pub async fn web_import(
         }
         Ok(added)
     })?;
-    Ok(WebImport { added, pages: r.pages, docs: r.docs.len(), errors: r.errors, stopped: r.stopped })
+    Ok(WebImport { added, pages: r.pages, new_pages: r.new_pages, remaining: r.remaining, docs: r.docs.len(), errors: r.errors, stopped: r.stopped })
 }
 
 #[tauri::command]
