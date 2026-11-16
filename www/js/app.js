@@ -282,14 +282,14 @@ async function addWeb() {
 
   // progress dialog: closed by the code when the download ends, its button stops it
   const line = h('div.desc', t('Kapcsolódás…'));
-  const cur = h('div.note', { style: { overflowWrap: 'anywhere' } }, '');
+  const cur = h('div.note', { style: { overflowWrap: 'anywhere', whiteSpace: 'pre-line' } }, '');
   let dlg = null;
   const shown = modal({ title: t('Weboldal letöltése'), body: h('div', line, cur), onOpen: (m) => { dlg = m; },
     buttons: [{ label: t('Leállítás (a már letöltött megmarad)'), value: 'stop', danger: true }] });
   shown.then((v) => { if (v === 'stop' || v === null) invoke('web_cancel').catch(() => {}); });
   const un = await window.__TAURI__.event.listen('web-progress', ({ payload: p }) => {
-    line.textContent = t('{0} cím megnézve · {1} oldal mentve · {2} dokumentum · {3} a sorban', p.done, p.pages, p.docs, p.queued);
-    cur.textContent = p.url;
+    line.textContent = t('{0} / {1} oldal mentve · {2} cím megnézve · {3} dokumentum · {4} talált link még a sorban (a korlátnál megáll)', p.pages, p.max, p.done, p.docs, p.queued);
+    cur.textContent = p.url + (p.delay_ms >= 2000 ? '\n' + t('A webhely kérésére {0} másodpercet vár két oldal között.', Math.round(p.delay_ms / 1000)) : '');
   });
   try {
     const r = await invoke('web_import', { skillId: S.skillId, url: url.value.trim(), depth: +depth.value, maxPages: Math.max(1, +max.value || 200), samePrefix: prefix.checked, docs: docs.checked });

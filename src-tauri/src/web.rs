@@ -52,6 +52,9 @@ pub struct CrawlOpts {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct WebProgress {
+    /// the wait between two requests (the site's Crawl-delay, at least our own)
+    pub delay_ms: u64,
+    pub max: usize,
     pub done: usize,
     pub queued: usize,
     pub pages: usize,
@@ -119,12 +122,27 @@ fn is_doc_link(u: &Url) -> bool {
     !e.is_empty() && !matches!(e.as_str(), "html" | "htm" | "xhtml" | "php" | "asp" | "aspx" | "jsp") && kind_of(Path::new(&format!("x.{e}"))).is_some_and(|k| k != "web" && k != "image")
 }
 
+/// Wiki / CMS links that are not content: edit, history, diff, backlinks, login,
+/// export, sorting… (DokuWiki `?do=`, MediaWiki `action=`, `oldid=`, special pages).
+fn is_action_link(u: &Url) -> bool {
+    const KEYS: &[&str] = &["do", "action", "rev", "rev2[]", "oldid", "diff", "curid", "printable", "redlink", "returnto", "sectok", "idx", "tab_files", "tab_details", "mediado", "image", "ns", "media", "sort", "sortby", "order", "replytocom", "share", "print", "format", "veaction", "mobileaction", "useskin"];
+    if u.query_pairs().any(|(k, _)| KEYS.contains(&k.to_lowercase().as_str())) {
+        return true;
+    }
+    let path = u.path().to_lowercase();
+    ["/special:", "/user:", "/talk:", "/user_talk:", "/wp-login", "/wp-admin", "/feed", "/_export/", "/lib/exe/", "/login", "/logout", "/signin", "/register"]
+        .iter()
+        .any(|p| path.contains(p))
+}
+
 // ───────────────────────── robots.txt ─────────────────────────
 
 #[derive(Default)]
 struct Robots {
     disallow: Vec<String>,
     allow: Vec<String>,
+    /// seconds the site asks between two requests
+    crawl_delay: Option<f64>,
 }
 
 impl Robots {
@@ -150,6 +168,12 @@ impl Robots {
                     in_agents = false;
                     r.allow.push(v.to_string());
                 }
+                "crawl-delay" if ours => {
+                    in_agents = false;
+                    if let Ok(d) = v.parse::<f64>() {
+                        r.crawl_delay = Some(d.clamp(0.0, 120.0));
+                    }
+                }
                 _ => in_agents = false,
             }
         }
@@ -165,6 +189,14 @@ impl Robots {
 }
 
 fn rule_match(rule: &str, path: &str) -> bool {
+    // "Disallow: folder/" is meant from the root
+    let owned;
+    let rule = if rule.starts_with('/') || rule.starts_with('*') {
+        rule
+    } else {
+        owned = format!("/{rule}");
+        &owned
+    };
     let (rule, anchored) = match rule.strip_suffix('$') {
         Some(r) => (r, true),
         None => (rule, false),
@@ -398,6 +430,8 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         Ok(r) if r.status().is_success() => Robots::parse(&r.text().await.unwrap_or_default()),
         _ => Robots::default(),
     };
+    // the site's Crawl-delay is kept (e.g. codebase.c64.org asks 15 s)
+    let delay_ms = robots.crawl_delay.map(|d| (d * 1000.0) as u64).unwrap_or(0).max(o.delay_ms);
     fn in_scope(u: &Url, host: &str, prefix: &str, same_prefix: bool) -> bool {
         host_key(u) == host && (!same_prefix || u.path().starts_with(prefix) || u.path() == prefix.trim_end_matches('/'))
     }
@@ -413,6 +447,8 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
     let mut done = 0usize;
     let mut stopped = false;
     let max_docs = o.max_pages.max(1);
+    // connection errors in a row: the server stopped answering (often rate limiting)
+    let mut failures = 0usize;
 
     while let Some((url, depth)) = queue.pop_front() {
         if CANCEL.load(Ordering::Relaxed) {
@@ -425,19 +461,28 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         if done > 0 && !robots.allowed(url.path()) {
             continue;
         }
-        if done > 0 && o.delay_ms > 0 {
-            tokio_sleep(o.delay_ms).await;
+        if done > 0 && delay_ms > 0 && !sleep_cancellable(delay_ms).await {
+            stopped = true;
+            break;
         }
         done += 1;
-        emit(WebProgress { done, queued: queue.len(), pages: pages.len(), docs: docs.len(), url: url.to_string() });
+        emit(WebProgress { delay_ms, max: o.max_pages, done, queued: queue.len(), pages: pages.len(), docs: docs.len(), url: url.to_string() });
         let is_doc = is_doc_link(&url);
         if is_doc && (!o.docs || docs.len() >= max_docs) {
             continue;
         }
-        let resp = match client.get(url.clone()).send().await {
-            Ok(r) => r,
+        let resp = match fetch(&client, &url, delay_ms).await {
+            Ok(r) => {
+                failures = 0;
+                r
+            }
             Err(e) => {
                 errors.push(format!("{url}: {e}"));
+                failures += 1;
+                if failures >= 4 || done == 1 {
+                    errors.insert(0, tr("A webhely nem válaszol (lehet, hogy túl sok kérés miatt átmenetileg letiltott; próbáld később).", "The website does not answer (it may have blocked you for a while because of too many requests; try later)."));
+                    break;
+                }
                 continue;
             }
         };
@@ -496,7 +541,7 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
                     continue;
                 }
                 let doc = is_doc_link(&l);
-                let ok = if doc { o.docs && host_key(&l) == host } else { depth < o.depth && in_scope(&l, &host, &prefix, o.same_prefix) && !SKIP_EXT.contains(&ext_of(&l).as_str()) };
+                let ok = if doc { o.docs && host_key(&l) == host } else { depth < o.depth && in_scope(&l, &host, &prefix, o.same_prefix) && !SKIP_EXT.contains(&ext_of(&l).as_str()) && !is_action_link(&l) };
                 if ok {
                     seen.insert(key);
                     let mut l = l;
@@ -521,7 +566,7 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
         let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| final_url.path().to_string());
         pages.push(WebPage { url: norm(&final_url), title, text, depth });
     }
-    emit(WebProgress { done, queued: queue.len(), pages: pages.len(), docs: docs.len(), url: String::new() });
+    emit(WebProgress { delay_ms, max: o.max_pages, done, queued: queue.len(), pages: pages.len(), docs: docs.len(), url: String::new() });
 
     let n = pages.len();
     let archive = if pages.is_empty() {
@@ -544,6 +589,45 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
 
 async fn tokio_sleep(ms: u64) {
     let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(std::time::Duration::from_millis(ms))).await;
+}
+
+/// Waits, but stops early on web_cancel; false when cancelled.
+async fn sleep_cancellable(ms: u64) -> bool {
+    let mut left = ms;
+    while left > 0 {
+        if CANCEL.load(Ordering::Relaxed) {
+            return false;
+        }
+        let step = left.min(200);
+        tokio_sleep(step).await;
+        left -= step;
+    }
+    !CANCEL.load(Ordering::Relaxed)
+}
+
+/// GET with retries: connection errors, 429 and 503 are tried again after a wait
+/// (Retry-After when the server gives it).
+async fn fetch(client: &reqwest::Client, url: &Url, delay_ms: u64) -> Result<reqwest::Response, String> {
+    let mut wait = delay_ms.max(2000);
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 && !sleep_cancellable(wait).await {
+            return Err(tr("leállítva", "stopped"));
+        }
+        match client.get(url.clone()).send().await {
+            Ok(r) if matches!(r.status().as_u16(), 429 | 503) => {
+                let ra = r.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+                last = format!("HTTP {}", r.status().as_u16());
+                wait = ra.map(|s| s.min(120) * 1000).unwrap_or(wait * 3);
+            }
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                last = e.to_string();
+                wait *= 3;
+            }
+        }
+    }
+    Err(last)
 }
 
 fn read_archive(path: &Path) -> Result<Archive, String> {
@@ -584,6 +668,10 @@ mod tests {
         assert!(r.allowed("/private/ok/1"));
         assert!(!r.allowed("/files/a.pdf"));
         assert!(r.allowed("/files/a.pdf?x=1"));
+        let r = Robots::parse("User-agent: ClaudeBot\nDisallow: /\n\nUser-Agent: *\nCrawl-delay: 15\nDisallow: Ultimate_Tape_Archive/\n");
+        assert_eq!(r.crawl_delay, Some(15.0));
+        assert!(r.allowed("/doku.php"));
+        assert!(!r.allowed("/Ultimate_Tape_Archive/x"));
     }
 
     #[test]
@@ -595,6 +683,12 @@ mod tests {
         assert!(is_doc_link(&Url::parse("https://ex.com/d.pdf").unwrap()));
         assert!(!is_doc_link(&Url::parse("https://ex.com/d.html").unwrap()));
         assert_eq!(prefix_of(&page), "/docs/a/");
+        let act = |s: &str| is_action_link(&Url::parse(s).unwrap());
+        assert!(act("https://codebase.c64.org/doku.php?id=base:x&do=edit"));
+        assert!(act("https://codebase.c64.org/doku.php?id=base:x&rev=1234"));
+        assert!(act("https://en.wikipedia.org/w/index.php?title=X&action=history"));
+        assert!(act("https://en.wikipedia.org/wiki/Special:Random"));
+        assert!(!act("https://codebase.c64.org/doku.php?id=base:clearing_a_section_of_memory"));
     }
 
     #[test]
