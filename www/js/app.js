@@ -129,13 +129,20 @@ function toggleTheme() {
 }
 
 let busyTimer = 0;
+/** The busy bar follows the state: shown a little late (short work does not flash it), hidden at once. */
+function updateBusyBar(delay = 0) {
+  clearTimeout(busyTimer);
+  const bar = document.getElementById('busybar');
+  const busy = () => S.busy > 0 || S.queue.length > 0;
+  if (!busy()) { bar.classList.remove('on'); return; }
+  // the delayed show checks again: the work may have ended in the meantime
+  if (delay) busyTimer = setTimeout(() => bar.classList.toggle('on', busy()), delay);
+  else bar.classList.add('on');
+}
 function setBusy(on, label = '') {
   S.busy = Math.max(0, S.busy + (on ? 1 : -1));
   S.busyLabel = on ? label : S.busy ? S.busyLabel : '';
-  clearTimeout(busyTimer);
-  const bar = document.getElementById('busybar');
-  if (S.busy || S.queue.length) busyTimer = setTimeout(() => bar.classList.add('on'), 150);
-  else bar.classList.remove('on');
+  updateBusyBar(150);
   renderToolbar();
   renderStatusbar();
 }
@@ -420,8 +427,7 @@ function onProgress(p) {
     if (S.view === 'docs') renderContent();
     if (p.status !== 'processing') docRefresh();
   }
-  const bar = document.getElementById('busybar');
-  bar.classList.toggle('on', S.queue.length > 0 || S.busy > 0);
+  updateBusyBar();
   renderStatusbar();
   renderToolbar();
 }
