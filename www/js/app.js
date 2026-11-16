@@ -315,8 +315,11 @@ async function runWebJob(call, resumed = false) {
     buttons: [{ label: t('Leállítás (a már letöltött megmarad)'), value: 'stop', danger: true }] });
   shown.then((v) => { if (v === 'stop' || v === null) invoke('web_cancel').catch(() => {}); });
   const un = await window.__TAURI__.event.listen('web-progress', ({ payload: p }) => {
-    line.textContent = t('{0} / {1} oldal mentve · {2} cím megnézve · {3} dokumentum · {4} talált link még a sorban (a korlátnál megáll)', p.pages, p.max, p.done, p.docs, p.queued);
-    cur.textContent = p.url + (p.delay_ms >= 2000 ? '\n' + t('A webhely kérésére {0} másodpercet vár két oldal között.', Math.round(p.delay_ms / 1000)) : '');
+    line.textContent = t('Mentett oldalak: {0} / {1} · megnézve: {2} · dokumentumok: {3} · sorra váró linkek: {4}', p.pages, p.max, p.done, p.docs, p.queued);
+    // slow sites: how long the links already waiting take (at most up to the page limit)
+    const mins = Math.ceil(Math.min(p.queued, Math.max(0, p.max - p.pages)) * p.delay_ms / 60000);
+    cur.textContent = p.url + (p.delay_ms >= 2000 ? '\n' + t('A webhely kérésére {0} másodpercet vár két oldal között.', Math.round(p.delay_ms / 1000))
+      + (mins > 0 ? ' ' + t('A sorban lévő linkek még kb. {0} percig tartanak.', mins) : '') : '');
   });
   try {
     const r = await call();

@@ -506,20 +506,24 @@ pub async fn crawl(o: CrawlOpts, out_dir: &Path, emit: impl Fn(WebProgress)) -> 
     let archive_path = match &o.resume {
         Some(p) => {
             let a = read_archive(p)?;
+            let q: VecDeque<(Url, u32)> = a.queue.iter().filter_map(|x| Url::parse(&x.url).ok().map(|u| (u, x.depth))).collect();
+            // an older archive without a saved queue: the site is walked again from the start;
+            // its saved pages are visited again too (their links lead further), but the text
+            // check below keeps them from being added twice
+            let rewalk = q.is_empty() && !a.finished;
             for pg in &a.pages {
                 texts.insert(text_hash(&pg.text));
-                seen.insert(pg.url.clone());
+                if !rewalk {
+                    seen.insert(pg.url.clone());
+                }
             }
-            seen.extend(a.seen.iter().cloned());
             pages = a.pages;
-            let q: VecDeque<(Url, u32)> = a.queue.iter().filter_map(|x| Url::parse(&x.url).ok().map(|u| (u, x.depth))).collect();
-            if !q.is_empty() || a.finished {
+            if !rewalk {
+                seen.extend(a.seen.iter().cloned());
                 // a finished download has nothing left to visit
                 queue = q;
                 first_is_start = false;
             }
-            // an older archive without a saved queue: the site is walked again from the start
-            // (the pages already there are not added twice)
             p.clone()
         }
         None => out_dir.join(format!("{host}-{stamp}.skweb")),
