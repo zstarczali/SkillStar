@@ -168,6 +168,7 @@ export const EN = {
   'Beállítások mappa': 'Settings folder',
   'Másolás': 'Copy',
   'Bezárás': 'Close',
+  'További fülek: {0}': 'More tabs: {0}',
   'Tallózás…': 'Browse…',
   'Automatikus': 'Automatic',
   'Windows beépített OCR': 'Built-in Windows OCR',

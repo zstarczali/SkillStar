@@ -1,6 +1,13 @@
 SkillStar - What's new
 ======================
 
+1.2.2
+-----
+- When the view tabs do not fit in the window, the ones that fit
+  are shown (the active one always) and a "v N" button after them
+  lists the other views: pick one from its menu to switch to it.
+  The tab bar follows the window width when it is resized.
+
 1.2.1
 -----
 - Continue a website download: the download is saved after every page,

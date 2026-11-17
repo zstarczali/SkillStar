@@ -1,7 +1,7 @@
 // SkillStar – the views of one skill: Documents, Text, Skill (metadata),
 // Package (preview + build) and Search; plus the sidebar with the skills.
 
-import { invoke, h, icon, toast, modal, confirmDlg, contextMenu, relTime, fmtDate, debounce } from './util.js';
+import { invoke, h, icon, toast, modal, confirmDlg, contextMenu, fitTabs, relTime, fmtDate, debounce } from './util.js';
 import { t } from './i18n.js';
 import { mdRender } from './markdown.js';
 
@@ -108,6 +108,7 @@ export function renderViewTabs(ctx) {
   el.replaceChildren(...VIEWS.map(([id, label, ic]) => h('div.tab' + (S.view === id ? '.active' : ''), { on: { click: () => ctx.setView(id) } },
     icon(ic), h('span.name', t(label)),
     id === 'docs' && S.docs.length ? h('span.tab-count', String(S.docs.length)) : null)));
+  fitTabs(el, VIEWS.findIndex(([id]) => id === S.view), (i) => ({ label: t(VIEWS[i][1]), icon: VIEWS[i][2], action: () => ctx.setView(VIEWS[i][0]) }));
 }
 
 // ───────────────────────── documents ─────────────────────────
