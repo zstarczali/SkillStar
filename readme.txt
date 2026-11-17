@@ -1,7 +1,7 @@
 SkillStar Installation Guide
 ===========================
 
-Version 1.2.1
+Version 1.2.2
 -------------
 Skill packages for Claude, Agent Skills (Codex, Gemini CLI, Copilot,
 Cursor), ChatGPT, Gemini, DeepSeek and RAG; questions answered from the
